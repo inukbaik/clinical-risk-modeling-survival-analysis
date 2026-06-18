@@ -8,29 +8,32 @@ The project is designed as a public-safe portfolio example. It does not include 
 
 The current version includes:
 
--   Synthetic cohort data generation
--   Centralized variable configuration in `R/config.R`
--   Basic data cleaning and validation in `R/data_cleaning.R`
--   Removal of invalid follow-up times before survival modeling
--   Generalized variable names for public-safe demonstration
+- Synthetic cohort data generation
+- Centralized variable configuration in `R/config.R`
+- Basic data cleaning and validation in `R/data_cleaning.R`
+- Removal of invalid follow-up times before survival modeling
+- Type-casting and factor encoding of all modeled variables
+- Cleaned dataset saved as a typed RDS file for downstream scripts
+- Generalized variable names for public-safe demonstration
 
 Future steps will add descriptive tables, Cox proportional hazards models, propensity score matching, random forest feature importance, and a final report.
 
 ## Project Structure
 
--   `README.md`
--   `.gitignore`
--   `R/`
-    -   `config.R`
-    -   `data_cleaning.R`
--   `scripts/`
-    -   `01_generate_synthetic_data.R`
--   `data/`
-    -   `synthetic/`
--   `outputs/`
-    -   `tables/`
-    -   `figures/`
--   `reports/`
+- `README.md`
+- `.gitignore`
+- `R/`
+  - `config.R`
+  - `data_cleaning.R`
+- `scripts/`
+  - `01_generate_synthetic_data.R`
+  - `02_clean_data.R`
+- `data/`
+  - `synthetic/` — `synthetic_cohort.csv` (raw), `synthetic_cohort_clean.rds` (cleaned)
+- `outputs/`
+  - `tables/`
+  - `figures/`
+- `reports/`
 
 ## Synthetic Data
 
@@ -44,8 +47,29 @@ This creates:
 
 The dataset uses generalized variable names to preserve the structure of an observational clinical modeling workflow while avoiding study-specific details.
 
+## Data Cleaning
+
+Clean and validate the synthetic cohort with:
+
+`Rscript scripts/02_clean_data.R`
+
+This reads `data/synthetic/synthetic_cohort.csv`, applies `clean_clinical_data()` from `R/data_cleaning.R`, and saves the result to:
+
+`data/synthetic/synthetic_cohort_clean.rds`
+
+The cleaning step:
+
+- Validates that all required columns are present
+- Removes records with missing or non-positive follow-up time
+- Casts continuous variables to numeric
+- Casts event indicators to integer
+- Encodes `exposure_group` as a factor with `Exposure_A` as the reference level
+- Encodes binary clinical predictors and demographic flags as factors
+
+Downstream scripts should load `synthetic_cohort_clean.rds` via `readRDS()` rather than re-reading the CSV, so that column types and factor levels are preserved exactly.
+
 | Variable group | Example columns | Description |
-|----|----|----|
+|------------------------|------------------------|------------------------|
 | Record identifier | `record_id` | Synthetic row-level ID |
 | Demographics | `demo_age`, `demo_sex`, `demo_race` | Synthetic demographic predictors |
 | Baseline clinical predictors | `clinical_binary_1` to `clinical_binary_6`, `clinical_continuous_1` | Masked baseline clinical variables |
@@ -62,12 +86,12 @@ The cleaning step validates required columns and excludes records with missing o
 
 ## Planned Workflow
 
-1.  Generate synthetic cohort data
-2.  Clean and validate the dataset
+1.  Generate synthetic cohort data — `scripts/01_generate_synthetic_data.R`
+2.  Clean and validate the dataset — `scripts/02_clean_data.R`
 3.  Create descriptive Table 1 summaries
-4.  Fit Cox proportional hazards models
-5.  Apply propensity score matching and check covariate balance
-6.  Train random forest models for feature importance
+4.  Apply propensity score matching and check covariate balance
+5.  Fit Cox proportional hazards models
+6.  Train random forest models for feature importance with non-matched data
 7.  Export selected tables and figures
 8.  Summarize the workflow in a final report
 
