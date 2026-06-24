@@ -10,21 +10,32 @@ This repository is intended as a public-safe portfolio example. It contains no r
 clinical-risk-modeling-survival-analysis/
 ├── R/
 │   ├── config.R                  # Central variable names, paths, model specs
+│   ├── cox_modeling.R            # fit_cox_model(), extract_cox_results()
 │   ├── data_cleaning.R           # clean_clinical_data(), create_age_subcohort()
 │   ├── descriptive_tables.R      # create_tableone_summary(), create_outcome_followup_summary()
+│   ├── propensity_matching.R     # run_propensity_matching(), extract_psm_balance(), build_attempt_log_df()
 │   └── validation.R              # Reusable modeling validation helpers
 ├── scripts/
 │   ├── 01_generate_synthetic_data.R
 │   ├── 02_clean_data.R
-│   └── 03_descriptive_tables.R
+│   ├── 03_descriptive_tables.R
+│   ├── 04_propensity_matching.R
+│   └── 05_cox_models.R
 ├── data/
 │   └── synthetic/
 │       ├── synthetic_cohort.csv          # Raw generated cohort
-│       └── synthetic_cohort_clean.rds    # Typed and factor-encoded
+│       ├── synthetic_cohort_clean.rds    # Typed and factor-encoded
+│       └── matched_clinical_data.rds     # Propensity-score-matched cohort
 ├── outputs/
 │   ├── tables/
 │   │   ├── table1_baseline_characteristics.csv
-│   │   └── outcome_followup_summary.csv
+│   │   ├── outcome_followup_summary.csv
+│   │   ├── psm_balance_summary.csv
+│   │   ├── psm_matching_summary.csv
+│   │   └── cox_results.csv
+│   ├── models/
+│   │   ├── matchit_object.rds
+│   │   └── cox_models.rds
 │   └── figures/
 ├── reports/
 └── README.md
@@ -38,9 +49,11 @@ Each script is independently runnable from the repository root. Run them in orde
 Rscript scripts/01_generate_synthetic_data.R
 Rscript scripts/02_clean_data.R
 Rscript scripts/03_descriptive_tables.R
+Rscript scripts/04_propensity_matching.R
+Rscript scripts/05_cox_models.R
 ```
 
-Scripts 02 and 03 will stop with a clear error if their required input files are missing.
+Each script stops with a clear error if its required input files are missing.
 
 ## Synthetic Data
 
@@ -123,13 +136,64 @@ outputs/tables/outcome_followup_summary.csv
 
 Both functions accept any cohort data frame and a `cohort_label` argument, making them reusable for matched cohorts in later steps.
 
+## Propensity Score Matching
+
+`scripts/04_propensity_matching.R`
+
+Applies 1:1 nearest-neighbor propensity score matching using `MatchIt::matchit()`. The propensity model uses all baseline covariates (demographics and clinical predictors); outcome variables, follow-up time variables, and `post_baseline_indicator` are excluded.
+
+A caliper search runs from 0.20 to 0.01 (in propensity score SD units, step −0.01). The first (largest) caliper where every baseline covariate has absolute standardized mean difference (SMD) < 0.10 is selected. If no caliper passes, the script stops with the best attempted caliper, lowest max SMD, and the names of remaining imbalanced variables.
+
+**Outputs:**
+
+```
+data/synthetic/matched_clinical_data.rds      # Matched cohort for downstream modeling
+outputs/models/matchit_object.rds             # Fitted matchit object
+outputs/tables/psm_balance_summary.csv        # Per-variable SMD before and after matching
+outputs/tables/psm_matching_summary.csv       # Per-caliper attempt log
+```
+
+## Cox Survival Modeling
+
+`scripts/05_cox_models.R`
+
+Fits Cox proportional hazards models for both outcomes across the matched cohort and an age 65+ matched subcohort. Four adjustment models are fit per outcome per cohort. Requires `matched_clinical_data.rds`; fails fast with a message to run `scripts/04_propensity_matching.R` if the file is missing.
+
+- **Model 1** — exposure group only (unadjusted)
+- **Model 2** — exposure group + demographics (`demo_age`, `demo_sex`, `demo_race`)
+- **Model 3** — Model 2 + all binary clinical predictors (`clinical_binary_1` through `clinical_binary_6`)
+- **Model 4** — Model 3 + continuous clinical predictor (`clinical_continuous_1`)
+
+Each outcome is modeled using its matched follow-up time (`outcome_1` / `followup_time_1`, `outcome_2` / `followup_time_2`).
+
+**Fail-fast validation** runs before each model fit:
+
+- Exposure variable has exactly two groups
+- Outcome variable is binary (0/1 integer, no NAs)
+- Minimum event count met (≥ 10 events)
+- Follow-up time is numeric, positive, and complete
+- All predictor columns exist in the data
+- Factor predictors have at least two observed levels
+- No leakage variables (outcomes, follow-up times, `post_baseline_indicator`, record ID) appear in the predictor list
+
+Models that fail validation are skipped with a descriptive console message identifying the cohort, outcome, and model; the remaining models continue. Modeling functions are implemented in `R/cox_modeling.R`, which contains no file I/O or hard-coded paths.
+
+**Outputs:**
+
+```
+outputs/tables/cox_results.csv    # Per-term hazard ratios, 95% CIs, p-values
+outputs/models/cox_models.rds     # Named list of fitted coxph objects
+```
+
+The matched data retains all original columns, so the same four-model covariate structure and all fail-fast validation checks apply unchanged.
+
 ## Planned Workflow
 
 1. Generate synthetic cohort data — `scripts/01_generate_synthetic_data.R`
 2. Clean and validate the dataset — `scripts/02_clean_data.R`
 3. Create descriptive Table 1 summaries — `scripts/03_descriptive_tables.R`
-4. Apply propensity score matching and check covariate balance
-5. Fit Cox proportional hazards models
+4. Apply propensity score matching and check covariate balance — `scripts/04_propensity_matching.R`
+5. Fit Cox proportional hazards models on the matched cohort — `scripts/05_cox_models.R`
 6. Train random forest models for feature importance
 7. Summarize the workflow in a final reproducible report
 
