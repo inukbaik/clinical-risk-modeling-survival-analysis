@@ -14,13 +14,15 @@ clinical-risk-modeling-survival-analysis/
 │   ├── data_cleaning.R           # clean_clinical_data(), create_age_subcohort()
 │   ├── descriptive_tables.R      # create_tableone_summary(), create_outcome_followup_summary()
 │   ├── propensity_matching.R     # run_propensity_matching(), extract_psm_balance(), build_attempt_log_df()
+│   ├── random_forest.R           # build_rf_predictor_set(), fit_rf_model(), evaluate_rf_model(), extract_rf_importance(), plot_rf_importance()
 │   └── validation.R              # Reusable modeling validation helpers
 ├── scripts/
 │   ├── 01_generate_synthetic_data.R
 │   ├── 02_clean_data.R
 │   ├── 03_descriptive_tables.R
 │   ├── 04_propensity_matching.R
-│   └── 05_cox_models.R
+│   ├── 05_cox_models.R
+│   └── 06_random_forest.R
 ├── data/
 │   └── synthetic/
 │       ├── synthetic_cohort.csv          # Raw generated cohort
@@ -32,11 +34,21 @@ clinical-risk-modeling-survival-analysis/
 │   │   ├── outcome_followup_summary.csv
 │   │   ├── psm_balance_summary.csv
 │   │   ├── psm_matching_summary.csv
-│   │   └── cox_results.csv
+│   │   ├── cox_results.csv
+│   │   ├── rf_auc_summary.csv
+│   │   ├── rf_importance_overall_outcome_1.csv
+│   │   ├── rf_importance_overall_outcome_2.csv
+│   │   ├── rf_importance_age65_outcome_1.csv
+│   │   └── rf_importance_age65_outcome_2.csv
 │   ├── models/
 │   │   ├── matchit_object.rds
-│   │   └── cox_models.rds
+│   │   ├── cox_models.rds
+│   │   └── rf_models.rds
 │   └── figures/
+│       ├── rf_importance_overall_outcome_1.png
+│       ├── rf_importance_overall_outcome_2.png
+│       ├── rf_importance_age65_outcome_1.png
+│       └── rf_importance_age65_outcome_2.png
 ├── reports/
 └── README.md
 ```
@@ -51,6 +63,7 @@ Rscript scripts/02_clean_data.R
 Rscript scripts/03_descriptive_tables.R
 Rscript scripts/04_propensity_matching.R
 Rscript scripts/05_cox_models.R
+Rscript scripts/06_random_forest.R
 ```
 
 Each script stops with a clear error if its required input files are missing.
@@ -187,15 +200,47 @@ outputs/models/cox_models.rds     # Named list of fitted coxph objects
 
 The matched data retains all original columns, so the same four-model covariate structure and all fail-fast validation checks apply unchanged.
 
-## Planned Workflow
+## Random Forest Feature Importance
 
-1. Generate synthetic cohort data — `scripts/01_generate_synthetic_data.R`
-2. Clean and validate the dataset — `scripts/02_clean_data.R`
-3. Create descriptive Table 1 summaries — `scripts/03_descriptive_tables.R`
-4. Apply propensity score matching and check covariate balance — `scripts/04_propensity_matching.R`
-5. Fit Cox proportional hazards models on the matched cohort — `scripts/05_cox_models.R`
-6. Train random forest models for feature importance
-7. Summarize the workflow in a final reproducible report
+`scripts/06_random_forest.R`
+
+Trains random forest classifiers to identify baseline predictors of each outcome using the unmatched cleaned cohort. This step is separate from the Cox models: the goal is to characterize which baseline variables are most informative, not to estimate a treatment effect.
+
+**Modeling approach:**
+
+- Predictor set is drawn from `R/config.R`; all leakage variables (follow-up times, outcome indicators, post-baseline indicators, record ID) are excluded before any data is touched
+- The cohort is split into 80% training and 20% held-out test using a stratified split to preserve the event rate in each partition
+- SMOTE oversampling is applied to the training data only, after the split, to address class imbalance
+- Hyperparameter tuning uses 5-fold cross-validation with ROC-AUC as the metric, run via `caret` on a stratified tuning subset to keep runtime manageable
+- The final model is fit with `ranger` (500 trees, permutation importance) on the full SMOTE'd training data using the best parameters from the tuning phase
+- Feature importance is extracted as permutation importance from the final `ranger` model
+
+Models are fit for both outcomes across two cohorts:
+
+- **Overall cleaned cohort** — all records from `synthetic_cohort_clean.rds`
+- **Age 65+ cohort** — restricted to `demo_age >= 65` via `create_age_subcohort()`
+
+The same fail-fast validation checks used in the Cox step apply here: binary outcome format, minimum event count, predictor column presence, leakage exclusion, and factor level checks. A run that fails validation is skipped with a descriptive message; remaining runs continue.
+
+**Outputs:**
+
+```
+outputs/tables/rf_auc_summary.csv                    # Test-set AUC per cohort and outcome
+outputs/tables/rf_importance_overall_outcome_1.csv   # Permutation importance, overall cohort, outcome 1
+outputs/tables/rf_importance_overall_outcome_2.csv   # Permutation importance, overall cohort, outcome 2
+outputs/tables/rf_importance_age65_outcome_1.csv     # Permutation importance, age 65+ cohort, outcome 1
+outputs/tables/rf_importance_age65_outcome_2.csv     # Permutation importance, age 65+ cohort, outcome 2
+outputs/figures/rf_importance_overall_outcome_1.png  # Top-15 importance bar chart, overall cohort, outcome 1
+outputs/figures/rf_importance_overall_outcome_2.png  # Top-15 importance bar chart, overall cohort, outcome 2
+outputs/figures/rf_importance_age65_outcome_1.png    # Top-15 importance bar chart, age 65+ cohort, outcome 1
+outputs/figures/rf_importance_age65_outcome_2.png    # Top-15 importance bar chart, age 65+ cohort, outcome 2
+outputs/models/rf_models.rds                         # Named list of fitted ranger objects
+```
+
+## Planned Next Steps
+
+1. Reproducible report — `reports/` RMarkdown summary integrating all pipeline outputs
+2. Final project polish and documentation review
 
 ## Design Notes
 
