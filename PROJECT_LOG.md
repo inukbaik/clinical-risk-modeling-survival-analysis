@@ -1,5 +1,9 @@
 # PROJECT_LOG.md
 
+## 2026-07-02 — Amendment: RF subcohort naming superseded
+
+**Note:** The 2026-06-27 entry below ("Random forest feature importance workflow") describes a `clinical_binary_1 == 1` subcohort producing `rf_importance_subcohort_*` outputs. This is historical and no longer reflects the codebase. The RF subgroup workflow was changed to an age 65+ subcohort via `create_age_subcohort(age_cutoff = 65)` (slug `age65`) in `scripts/06_random_forest.R`, and current outputs are `rf_importance_age65_outcome_1/2.csv` and `rf_importance_age65_outcome_1/2.png`. No `rf_importance_subcohort_*` files exist. Documentation-only correction; no code or output changes.
+
 ## 2026-07-02 — Fix RF parallel backend fallback for unreliable core detection
 
 **Task:** An independent audit found that `scripts/06_random_forest.R` crashed with `missing value where TRUE/FALSE needed` in sandboxed/CI environments where `parallel::detectCores()` returns `NA`. Made core detection robust with a safe single-threaded fallback so the RF step (and pipeline) always completes; parallelism is a speed optimization only and must never gate correctness.
