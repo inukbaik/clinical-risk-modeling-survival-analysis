@@ -1,0 +1,5 @@
+"caliper","max_smd","matched_n","retention_rate","imbalanced_vars","pass"
+0.2,0.1171,138514,0.9234,"clinical_continuous_1",FALSE
+0.19,0.1101,137918,0.9195,"clinical_continuous_1",FALSE
+0.18,0.1037,137374,0.9158,"clinical_continuous_1",FALSE
+0.17,0.0956,136800,0.912,"",TRUE

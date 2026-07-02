@@ -1,0 +1,13 @@
+"feature","importance"
+"demo_sex_X1",0.0769976732448781
+"demo_race_Group_B",0.0628538335710327
+"exposure_group_Exposure_B",0.0611406684123888
+"clinical_binary_2_X1",0.0560140775278924
+"clinical_binary_5_X1",0.0551575708852854
+"clinical_binary_3_X1",0.0415244837389338
+"clinical_binary_4_X1",0.0359509173367235
+"clinical_binary_6_X1",0.0196713766396096
+"clinical_binary_1_X1",0.0140824741609009
+"demo_age",0.00984335014640359
+"clinical_continuous_1",0.00669916750917271
+"demo_race_Missing",0.00391012904951588
