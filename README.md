@@ -68,6 +68,8 @@ Rscript scripts/06_random_forest.R
 
 Each script stops with a clear error if its required input files are missing.
 
+Package versions are pinned in `renv.lock`. Restore them with `renv::restore()`.
+
 ## Synthetic Data
 
 `scripts/01_generate_synthetic_data.R`

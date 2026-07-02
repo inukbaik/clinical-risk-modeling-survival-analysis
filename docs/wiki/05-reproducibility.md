@@ -21,9 +21,10 @@ missing (see [[06-agent-rules]] for the fail-fast philosophy).
 
 ## Seed
 
-`SEED <- 42` is defined in `R/config.R` as the single source of truth for
-reproducibility-sensitive steps (data generation, train/test splits,
-SMOTE, matching, CV folds).
+`PROJECT_SEED <- 123L` is defined in `R/config.R` as the single
+project-level seed used across all stochastic pipeline steps: synthetic
+data generation, propensity score matching, and the random forest
+train/test split, SMOTE, and CV tuning folds.
 
 ## Package dependencies
 
@@ -38,6 +39,10 @@ installed, `parallel::detectCores()` can't determine a usable core count
 (e.g. in some sandboxed or restricted environments), or fewer than 2 cores
 are available. This is a runtime speed optimization only and never blocks
 the pipeline from completing.
+
+Exact package versions are pinned in `renv.lock` via
+[`renv`](https://rstudio.github.io/renv/). Restore the recorded versions
+into a project-local library with `renv::restore()`.
 
 ## Regenerating outputs after a code change
 
