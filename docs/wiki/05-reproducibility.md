@@ -32,7 +32,12 @@ instructions if any are missing, rather than silently attempting to
 proceed. Packages used across the pipeline include: `tableone`,
 `MatchIt`, `survival`, `caret`, `ranger`, `recipes`, `themis`, `pROC`,
 `ggplot2`, `tidyselect`. `doParallel` is optional — the random forest step
-degrades gracefully to single-threaded execution if it isn't installed.
+uses parallel processing when it's available and CPU core detection
+succeeds, and falls back to single-threaded execution if `doParallel` isn't
+installed, `parallel::detectCores()` can't determine a usable core count
+(e.g. in some sandboxed or restricted environments), or fewer than 2 cores
+are available. This is a runtime speed optimization only and never blocks
+the pipeline from completing.
 
 ## Regenerating outputs after a code change
 

@@ -54,15 +54,33 @@ for (pkg in required_pkgs) {
 
 # ---------------------------------------------------------------------------
 # Parallel backend (optional — speeds up caret CV folds)
+#
+# CPU core detection is not reliable in all execution environments (e.g. some
+# sandboxed or restricted environments report NA from detectCores()). Since
+# parallelism here is a speed optimization only, a detection failure must not
+# halt the pipeline — fall back to single-threaded execution instead.
 # ---------------------------------------------------------------------------
 
-if (requireNamespace("doParallel", quietly = TRUE)) {
-  n_cores <- max(1L, parallel::detectCores() - 1L)
-  doParallel::registerDoParallel(cores = n_cores)
-  cat(sprintf("Parallel backend registered: %d cores\n\n", n_cores))
+detected_cores <- parallel::detectCores(logical = TRUE)
+
+usable_cores <- if (is.numeric(detected_cores) && length(detected_cores) == 1L &&
+                     is.finite(detected_cores) && detected_cores >= 2) {
+  max(1L, detected_cores - 1L)
 } else {
+  1L
+}
+
+parallel_registered <- FALSE
+
+if (requireNamespace("doParallel", quietly = TRUE) && usable_cores > 1L) {
+  doParallel::registerDoParallel(cores = usable_cores)
+  parallel_registered <- TRUE
+  cat(sprintf("Parallel backend registered: %d cores\n\n", usable_cores))
+} else if (!requireNamespace("doParallel", quietly = TRUE)) {
   cat("doParallel not installed — running single-threaded.\n")
   cat("Install with: install.packages(\"doParallel\")\n\n")
+} else {
+  cat("Unable to detect usable CPU cores; running random forest step single-threaded.\n\n")
 }
 
 if (RF_DEV_MODE) {
@@ -163,6 +181,12 @@ all_models   <- list()
 auc_rows     <- list()
 skipped_msgs <- character(0)
 fit_count    <- 0L
+
+# Top-level `on.exit()` does not fire when Rscript finishes (there is no
+# enclosing function frame to exit), so the parallel backend registered
+# above is stopped safely here via tryCatch's `finally`, which runs on both
+# normal completion and error, instead.
+tryCatch({
 
 for (cohort in cohort_list) {
 
@@ -326,6 +350,12 @@ for (cohort in cohort_list) {
     }
   }
 }
+
+}, finally = {
+  if (parallel_registered) {
+    doParallel::stopImplicitCluster()
+  }
+})
 
 # ---------------------------------------------------------------------------
 # Save outputs
