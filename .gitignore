@@ -40,7 +40,13 @@ vignettes/*.pdf
 .Renviron
 
 # pkgdown site
-docs/
+docs/*
+# ...except the manually maintained project wiki (Obsidian vault content)
+!docs/wiki/
+!docs/wiki/**
+
+# Obsidian local settings
+.obsidian/
 
 # translation temp files
 po/*~

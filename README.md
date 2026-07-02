@@ -6,7 +6,7 @@ This repository is intended as a public-safe portfolio example. It contains no r
 
 ## Project Structure
 
-```
+```         
 clinical-risk-modeling-survival-analysis/
 ├── R/
 │   ├── config.R                  # Central variable names, paths, model specs
@@ -57,7 +57,7 @@ clinical-risk-modeling-survival-analysis/
 
 Each script is independently runnable from the repository root. Run them in order:
 
-```r
+``` r
 Rscript scripts/01_generate_synthetic_data.R
 Rscript scripts/02_clean_data.R
 Rscript scripts/03_descriptive_tables.R
@@ -74,14 +74,14 @@ Each script stops with a clear error if its required input files are missing.
 
 Generates a fully synthetic cohort with realistic covariate structure, confounded exposure assignment, and two time-to-event outcomes. Saves to:
 
-```
+```         
 data/synthetic/synthetic_cohort.csv
 ```
 
 The dataset uses generalized variable names to preserve the structure of an observational clinical modeling workflow while avoiding study-specific details.
 
 | Variable group | Columns | Description |
-|---|---|---|
+|----|----|----|
 | Record identifier | `record_id` | Synthetic row-level ID |
 | Demographics | `demo_age`, `demo_sex`, `demo_race` | Synthetic demographic predictors |
 | Baseline clinical | `clinical_binary_1`–`clinical_binary_6`, `clinical_continuous_1` | Masked binary and continuous baseline predictors |
@@ -96,7 +96,7 @@ The dataset uses generalized variable names to preserve the structure of an obse
 
 Reads the raw CSV, applies `clean_clinical_data()` from `R/data_cleaning.R`, and saves the result as a typed RDS file:
 
-```
+```         
 data/synthetic/synthetic_cohort_clean.rds
 ```
 
@@ -135,7 +135,7 @@ Generates baseline characteristic tables and outcome/follow-up summaries for:
 
 Generated via `create_tableone_summary()`, which wraps `tableone::CreateTableOne()`. Variables are summarised by exposure group, with continuous variables reported as mean (SD) and categorical variables as n (%). Requires the `tableone` package. `post_baseline_indicator` is excluded.
 
-```
+```         
 outputs/tables/table1_baseline_characteristics.csv
 ```
 
@@ -143,7 +143,7 @@ outputs/tables/table1_baseline_characteristics.csv
 
 Generated via `create_outcome_followup_summary()` using base R. Reports event counts, event percentages, and follow-up time distribution by exposure group for each outcome.
 
-```
+```         
 outputs/tables/outcome_followup_summary.csv
 ```
 
@@ -155,11 +155,11 @@ Both functions accept any cohort data frame and a `cohort_label` argument, makin
 
 Applies 1:1 nearest-neighbor propensity score matching using `MatchIt::matchit()`. The propensity model uses all baseline covariates (demographics and clinical predictors); outcome variables, follow-up time variables, and `post_baseline_indicator` are excluded.
 
-A caliper search runs from 0.20 to 0.01 (in propensity score SD units, step −0.01). The first (largest) caliper where every baseline covariate has absolute standardized mean difference (SMD) < 0.10 is selected. If no caliper passes, the script stops with the best attempted caliper, lowest max SMD, and the names of remaining imbalanced variables.
+A caliper search runs from 0.20 to 0.01 (in propensity score SD units, step −0.01). The first (largest) caliper where every baseline covariate has absolute standardized mean difference (SMD) \< 0.10 is selected. If no caliper passes, the script stops with the best attempted caliper, lowest max SMD, and the names of remaining imbalanced variables.
 
 **Outputs:**
 
-```
+```         
 data/synthetic/matched_clinical_data.rds      # Matched cohort for downstream modeling
 outputs/models/matchit_object.rds             # Fitted matchit object
 outputs/tables/psm_balance_summary.csv        # Per-variable SMD before and after matching
@@ -193,7 +193,7 @@ Models that fail validation are skipped with a descriptive console message ident
 
 **Outputs:**
 
-```
+```         
 outputs/tables/cox_results.csv    # Per-term hazard ratios, 95% CIs, p-values
 outputs/models/cox_models.rds     # Named list of fitted coxph objects
 ```
@@ -224,7 +224,7 @@ The same fail-fast validation checks used in the Cox step apply here: binary out
 
 **Outputs:**
 
-```
+```         
 outputs/tables/rf_auc_summary.csv                    # Test-set AUC per cohort and outcome
 outputs/tables/rf_importance_overall_outcome_1.csv   # Permutation importance, overall cohort, outcome 1
 outputs/tables/rf_importance_overall_outcome_2.csv   # Permutation importance, overall cohort, outcome 2
@@ -239,14 +239,20 @@ outputs/models/rf_models.rds                         # Named list of fitted rang
 
 ## Planned Next Steps
 
-1. Reproducible report — `reports/` RMarkdown summary integrating all pipeline outputs
-2. Final project polish and documentation review
+1.  Reproducible report — `reports/` RMarkdown summary integrating all pipeline outputs
+2.  Final project polish and documentation review
 
 ## Design Notes
 
 `R/config.R` is the central source of truth for all variable names, outcome specifications, file paths, and the leakage variable exclusion list (`LEAKAGE_VARS`). Downstream modules reference config objects rather than hard-coding column names, which makes the pipeline easy to adapt and audit.
 
 Each script is designed to fail fast with a descriptive error if required input files or columns are missing, so pipeline errors surface early rather than propagating silently.
+
+## Project Wiki
+
+Additional pipeline detail, output inventory, and maintenance notes are
+kept in `docs/wiki/`, a manually maintained project wiki. Start at
+`docs/wiki/00-index.md`.
 
 ## Privacy Note
 
