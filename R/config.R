@@ -11,6 +11,8 @@
 
 PATHS <- list(
   data_raw        = file.path("data", "synthetic", "synthetic_cohort.csv"),
+  data_clean      = file.path("data", "synthetic", "synthetic_cohort_clean.rds"),
+  data_matched    = file.path("data", "synthetic", "matched_clinical_data.rds"),
   output_tables   = file.path("outputs", "tables"),
   output_figures  = file.path("outputs", "figures"),
   output_models   = file.path("outputs", "models")
@@ -25,15 +27,16 @@ GROUP_VAR <- "exposure_group"
 
 DEMOGRAPHIC_VARS <- c("demo_age", "demo_sex", "demo_race")
 
-CLINICAL_VARS <- c(
+CLINICAL_BINARY_VARS <- c(
   "clinical_binary_1",
   "clinical_binary_2",
   "clinical_binary_3",
   "clinical_binary_4",
   "clinical_binary_5",
-  "clinical_binary_6",
-  "clinical_continuous_1"
+  "clinical_binary_6"
 )
+
+CLINICAL_VARS <- c(CLINICAL_BINARY_VARS, "clinical_continuous_1")
 
 # All baseline predictors available for modeling (demographics + clinical)
 BASELINE_PREDICTORS <- c(DEMOGRAPHIC_VARS, CLINICAL_VARS)
@@ -59,6 +62,11 @@ OUTCOME_SPECS <- list(
   )
 )
 
+# Flat convenience vectors derived from OUTCOME_SPECS, for callers that only
+# need the column names rather than the full spec (event indicator, label).
+OUTCOME_VARS  <- unname(vapply(OUTCOME_SPECS, function(x) x$event_var, character(1)))
+FOLLOWUP_VARS <- unname(vapply(OUTCOME_SPECS, function(x) x$time_var,  character(1)))
+
 # ---------------------------------------------------------------------------
 # Cox proportional hazards model specifications
 # ---------------------------------------------------------------------------
@@ -66,19 +74,7 @@ OUTCOME_SPECS <- list(
 # Outcome-specific time/event vars are pulled from OUTCOME_SPECS at runtime.
 
 COX_MODEL_SPECS <- list(
-  covariates = c(
-    GROUP_VAR,
-    "demo_age",
-    "demo_sex",
-    "demo_race",
-    "clinical_binary_1",
-    "clinical_binary_2",
-    "clinical_binary_3",
-    "clinical_binary_4",
-    "clinical_binary_5",
-    "clinical_binary_6",
-    "clinical_continuous_1"
-  )
+  covariates = c(GROUP_VAR, BASELINE_PREDICTORS)
 )
 
 # ---------------------------------------------------------------------------
@@ -87,18 +83,7 @@ COX_MODEL_SPECS <- list(
 # Variables used on the right-hand side of the PSM logistic model.
 # The treatment variable (GROUP_VAR) is always the left-hand side.
 
-PSM_FORMULA_VARS <- c(
-  "demo_age",
-  "demo_sex",
-  "demo_race",
-  "clinical_binary_1",
-  "clinical_binary_2",
-  "clinical_binary_3",
-  "clinical_binary_4",
-  "clinical_binary_5",
-  "clinical_binary_6",
-  "clinical_continuous_1"
-)
+PSM_FORMULA_VARS <- BASELINE_PREDICTORS
 
 # ---------------------------------------------------------------------------
 # Data-leakage exclusion list
@@ -119,5 +104,8 @@ LEAKAGE_VARS <- c(
 # ---------------------------------------------------------------------------
 # Reproducibility
 # ---------------------------------------------------------------------------
+# A single project-level seed used across all stochastic pipeline steps
+# (synthetic data generation, propensity score matching, random forest
+# train/test split and tuning).
 
-SEED <- 42
+PROJECT_SEED <- 123L

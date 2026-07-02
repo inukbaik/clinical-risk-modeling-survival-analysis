@@ -21,7 +21,7 @@ if (!requireNamespace("MatchIt", quietly = TRUE)) {
 # Input check
 # ---------------------------------------------------------------------------
 
-cleaned_path <- file.path("data", "synthetic", "synthetic_cohort_clean.rds")
+cleaned_path <- PATHS$data_clean
 
 if (!file.exists(cleaned_path)) {
   stop(
@@ -61,7 +61,7 @@ cat(sprintf(
   max(calipers), min(calipers)
 ))
 
-set.seed(SEED)
+set.seed(PROJECT_SEED)
 
 psm_result <- run_propensity_matching(
   data          = df_clean,
@@ -82,7 +82,7 @@ if (!dir.exists(PATHS$output_models)) dir.create(PATHS$output_models, recursive 
 # Save outputs
 # ---------------------------------------------------------------------------
 
-matched_data_path  <- file.path("data", "synthetic", "matched_clinical_data.rds")
+matched_data_path  <- PATHS$data_matched
 matchit_obj_path   <- file.path(PATHS$output_models, "matchit_object.rds")
 balance_table_path <- file.path(PATHS$output_tables, "psm_balance_summary.csv")
 matching_log_path  <- file.path(PATHS$output_tables, "psm_matching_summary.csv")

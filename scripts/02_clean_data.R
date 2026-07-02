@@ -45,7 +45,7 @@ cat("  Columns: ", ncol(cleaned), "\n")
 # Save
 # ---------------------------------------------------------------------------
 
-output_path <- file.path("data", "synthetic", "synthetic_cohort_clean.rds")
+output_path <- PATHS$data_clean
 
 saveRDS(cleaned, output_path)
 cat("\nCleaned dataset saved to:", output_path, "\n")

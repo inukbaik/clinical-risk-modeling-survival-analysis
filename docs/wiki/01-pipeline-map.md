@@ -20,7 +20,7 @@ See also: [[00-index]], [[03-modeling-workflow]]
 
 | File | Purpose |
 |---|---|
-| `R/config.R` | Central source of truth: paths, column-role lists (`ID_VAR`, `GROUP_VAR`, `DEMOGRAPHIC_VARS`, `CLINICAL_VARS`, `BASELINE_PREDICTORS`), `OUTCOME_SPECS`, `COX_MODEL_SPECS`, `PSM_FORMULA_VARS`, `LEAKAGE_VARS`, `SEED` |
+| `R/config.R` | Central source of truth: paths, column-role lists (`ID_VAR`, `GROUP_VAR`, `DEMOGRAPHIC_VARS`, `CLINICAL_VARS`, `CLINICAL_BINARY_VARS`, `BASELINE_PREDICTORS`), `OUTCOME_SPECS` (plus derived `OUTCOME_VARS`/`FOLLOWUP_VARS`), `COX_MODEL_SPECS`, `PSM_FORMULA_VARS`, `LEAKAGE_VARS`, `PROJECT_SEED` |
 | `R/data_cleaning.R` | `clean_clinical_data()`, `create_age_subcohort()` |
 | `R/descriptive_tables.R` | `create_tableone_summary()`, `create_outcome_followup_summary()` |
 | `R/propensity_matching.R` | `run_propensity_matching()`, `extract_psm_balance()`, `build_attempt_log_df()` |

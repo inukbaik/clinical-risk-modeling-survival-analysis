@@ -8,14 +8,16 @@
 # Run from the repository root:
 #   Rscript scripts/01_generate_synthetic_data.R
 
-set.seed(123)
+source("R/config.R")
+
+set.seed(PROJECT_SEED)
 
 # -----------------------------
 # Project paths
 # -----------------------------
 
-output_dir  <- "data/synthetic"
-output_file <- file.path(output_dir, "synthetic_cohort.csv")
+output_file <- PATHS$data_raw
+output_dir  <- dirname(output_file)
 
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)

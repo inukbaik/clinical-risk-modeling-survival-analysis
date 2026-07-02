@@ -23,7 +23,7 @@ if (!requireNamespace("survival", quietly = TRUE)) {
 # Input check
 # ---------------------------------------------------------------------------
 
-matched_path <- file.path("data", "synthetic", "matched_clinical_data.rds")
+matched_path <- PATHS$data_matched
 
 if (!file.exists(matched_path)) {
   stop(
@@ -46,31 +46,13 @@ cat("  Columns: ", ncol(df_matched), "\n\n")
 # Outcome specifications
 # ---------------------------------------------------------------------------
 
-outcome_specs <- list(
-  outcome_1 = list(
-    event_var = "outcome_1",
-    time_var  = "followup_time_1",
-    label     = "Outcome 1"
-  ),
-  outcome_2 = list(
-    event_var = "outcome_2",
-    time_var  = "followup_time_2",
-    label     = "Outcome 2"
-  )
-)
+outcome_specs <- OUTCOME_SPECS
 
 # ---------------------------------------------------------------------------
 # Model specifications
 # ---------------------------------------------------------------------------
 
-binary_clinical <- c(
-  "clinical_binary_1",
-  "clinical_binary_2",
-  "clinical_binary_3",
-  "clinical_binary_4",
-  "clinical_binary_5",
-  "clinical_binary_6"
-)
+binary_clinical <- CLINICAL_BINARY_VARS
 
 model_specs <- list(
   list(

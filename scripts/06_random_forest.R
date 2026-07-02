@@ -31,7 +31,7 @@ RF_DEV_MODE <- FALSE
 USE_TUNING_SUBSET   <- TRUE
 TUNING_MAX_N        <- 10000L
 
-RF_SEED             <- 123L
+RF_SEED             <- PROJECT_SEED
 RF_SMOTE_OVER_RATIO <- 0.5
 TUNE_NUM_TREES      <- 100L   # trees used during caret CV tuning phase only
 FINAL_NUM_TREES     <- 500L   # trees used for the final ranger model
@@ -91,7 +91,7 @@ if (RF_DEV_MODE) {
 # Input check
 # ---------------------------------------------------------------------------
 
-cleaned_path <- file.path("data", "synthetic", "synthetic_cohort_clean.rds")
+cleaned_path <- PATHS$data_clean
 
 if (!file.exists(cleaned_path)) {
   stop(
@@ -142,10 +142,13 @@ cohort_list <- list(
 # Outcome specifications
 # ---------------------------------------------------------------------------
 
-outcome_specs <- list(
-  list(slug = "outcome_1", event_var = "outcome_1", label = "Outcome 1"),
-  list(slug = "outcome_2", event_var = "outcome_2", label = "Outcome 2")
-)
+outcome_specs <- lapply(names(OUTCOME_SPECS), function(nm) {
+  list(
+    slug      = nm,
+    event_var = OUTCOME_SPECS[[nm]]$event_var,
+    label     = OUTCOME_SPECS[[nm]]$label
+  )
+})
 
 # ---------------------------------------------------------------------------
 # RF configuration

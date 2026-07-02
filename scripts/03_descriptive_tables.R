@@ -19,7 +19,7 @@ source("R/descriptive_tables.R")
 # Input check
 # ---------------------------------------------------------------------------
 
-cleaned_path <- file.path("data", "synthetic", "synthetic_cohort_clean.rds")
+cleaned_path <- PATHS$data_clean
 
 if (!file.exists(cleaned_path)) {
   stop(
@@ -42,32 +42,12 @@ cat("  Columns: ", ncol(df_clean), "\n\n")
 # Variable definitions
 # ---------------------------------------------------------------------------
 
-baseline_vars <- c(
-  "demo_age",
-  "demo_sex",
-  "demo_race",
-  "clinical_binary_1",
-  "clinical_binary_2",
-  "clinical_binary_3",
-  "clinical_binary_4",
-  "clinical_binary_5",
-  "clinical_binary_6",
-  "clinical_continuous_1"
-)
+baseline_vars <- BASELINE_PREDICTORS
 
-factor_vars <- c(
-  "demo_sex",
-  "demo_race",
-  "clinical_binary_1",
-  "clinical_binary_2",
-  "clinical_binary_3",
-  "clinical_binary_4",
-  "clinical_binary_5",
-  "clinical_binary_6"
-)
+factor_vars <- c("demo_sex", "demo_race", CLINICAL_BINARY_VARS)
 
-outcome_vars  <- c("outcome_1",       "outcome_2")
-followup_vars <- c("followup_time_1", "followup_time_2")
+outcome_vars  <- OUTCOME_VARS
+followup_vars <- FOLLOWUP_VARS
 
 # ---------------------------------------------------------------------------
 # Validate columns exist
