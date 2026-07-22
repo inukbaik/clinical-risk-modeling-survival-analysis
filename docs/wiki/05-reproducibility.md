@@ -40,10 +40,6 @@ installed, `parallel::detectCores()` can't determine a usable core count
 are available. This is a runtime speed optimization only and never blocks
 the pipeline from completing.
 
-Exact package versions are pinned in `renv.lock` via
-[`renv`](https://rstudio.github.io/renv/). Restore the recorded versions
-into a project-local library with `renv::restore()`.
-
 ## Regenerating outputs after a code change
 
 Because `data/synthetic/*.rds` and `outputs/models/*.rds` are git-ignored,
