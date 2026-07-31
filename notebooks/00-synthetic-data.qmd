@@ -1,0 +1,285 @@
+---
+title: "Synthetic data"
+subtitle: "What is simulated, how, and what the masking preserves"
+---
+
+```{r}
+#| label: setup
+source("R/setup.R")
+library(survival)
+library(knitr)
+```
+
+## Why synthetic data, and what survives the masking
+
+The original analysis used real patient records, so none of it can be published. Simply
+renaming the columns of a real dataset is not a solution — the values, the counts, and
+the joint distribution would all still be real. The alternative taken here is to
+regenerate the data from scratch, preserving the properties that make the analysis
+non-trivial and discarding everything else.
+
+What is preserved:
+
+- **Roles.** Each column plays the same part it played originally: identifier, exposure,
+  demographic, comorbidity, lab measure, event indicator, follow-up time, competing
+  event.
+- **Confounding.** The same covariates drive treatment assignment and the outcome. This
+  is the whole reason a propensity score is needed; without it, balance adjustment would
+  be decoration.
+- **Correlation between covariates.** The six binary clinical variables form a chain,
+  and the continuous measure depends on age and on two of the binaries. Independent
+  covariates would make every balance table look good by accident.
+- **A variable on the causal pathway.** `clinical_continuous_1` is affected by the
+  comorbidities and in turn affects the outcome. It is deliberately excluded from the
+  propensity model and entered last in the Cox ladder.
+- **Competing risks with month-precision death dates**, in Study B.
+- **Two real data defects**: a literal `"null"` string in a character column, and a
+  small number of negative follow-up times.
+
+What is discarded: every real value, every real count, the true cohort size, the
+therapeutic area, the outcome definitions, and the study period.
+
+What is *gained*: the true parameter values are known. Every notebook that follows
+checks its estimates against them.
+
+## The schema
+
+```{r}
+#| label: schema
+data.frame(
+  variable = c(ID_VAR, GROUP_VAR, DEMOGRAPHIC_VARS, CLINICAL_BINARY_VARS,
+               CLINICAL_CONTINUOUS_VAR),
+  role = c(
+    "Identifier",
+    "Exposure (reference level listed first)",
+    "Demographic — continuous", "Demographic — binary",
+    "Demographic — categorical, contains a missingness code",
+    rep("Baseline comorbidity — binary", length(CLINICAL_BINARY_VARS)),
+    "Baseline lab measure — continuous, on the causal pathway"
+  ),
+  in_propensity_model = c(
+    "No", "Treatment", rep("Yes", length(DEMOGRAPHIC_VARS)),
+    rep("Yes", length(CLINICAL_BINARY_VARS)), "No — see below"
+  )
+) |> kable()
+```
+
+`clinical_continuous_1` is left out of the propensity model on purpose. It is influenced
+by the comorbidities and influences the outcome, so conditioning on it would adjust away
+part of the very effect being estimated. Its exclusion is also what makes it the
+covariate that fails balance first — which is what the caliper search has to solve.
+
+## The data-generating process
+
+Survival times come from a Weibull proportional hazards model. The survivor function is
+
+$$S(t \mid x) = \exp\left\{-\left(\tfrac{t}{\lambda}\right)^{k}\exp(x'\beta)\right\}$$
+
+so that inverting at $U \sim \mathrm{Uniform}(0,1)$ gives event times directly, and
+$\exp(\beta)$ is a hazard ratio in the ordinary Cox sense. Censoring times are drawn
+separately, and follow-up is the minimum of the event time, the censoring time and the
+administrative horizon.
+
+The ordering matters. A common shortcut is to draw a follow-up time first and then draw
+an event indicator from a model that uses that time as a predictor. That produces data
+where no hazard ratio exists to be estimated, so every downstream Cox model is
+estimating a parameter the data does not have.
+
+```{r}
+#| label: dgp-code
+#| code-fold: true
+#| eval: false
+# From R/simulate.R
+weibull_ph_time <- function(lp, shape, scale0) {
+  u <- runif(length(lp))
+  scale0 * (-log(u) * exp(-lp))^(1 / shape)
+}
+
+t_evt  <- weibull_ph_time(lp, WEIBULL_SHAPE, scale0)
+t_cens <- rexp(n, rate = cens_rate)
+t_obs  <- pmin(t_evt, t_cens, STUDY_A_ADMIN_YEARS)
+event  <- as.integer(t_evt <= pmin(t_cens, STUDY_A_ADMIN_YEARS))
+```
+
+### True parameters
+
+```{r}
+#| label: true-params
+true_tbl <- data.frame(
+  quantity = c("Study A, outcome 1 — treatment",
+               "Study A, outcome 2 — treatment",
+               "Study B, event of interest — treatment",
+               "Study B, competing death — treatment"),
+  true_hr = round(exp(c(TRUE_A_OUTCOME_1[["treat"]], TRUE_A_OUTCOME_2[["treat"]],
+                        TRUE_B_EVENT[["treat"]], TRUE_B_DEATH[["treat"]])), 3)
+)
+kable(true_tbl)
+```
+
+Treatment lowers the hazard of the Study B event of interest but is essentially null on
+the competing death hazard. That asymmetry is deliberate: it is what makes the
+cause-specific and subdistribution hazard ratios differ in a direction known in advance,
+and therefore what makes fitting both of them informative rather than redundant.
+
+`demo_race` appears in **no** outcome model. Its true effect is exactly zero, which makes
+it the yardstick for reading the random forest importance rankings later.
+
+## Generating the cohorts
+
+```{r}
+#| label: generate
+study_a <- load_study("a", refresh = TRUE)
+study_b <- load_study("b", refresh = TRUE)
+
+data.frame(
+  study = c("A", "B"),
+  n = c(nrow(study_a), nrow(study_b)),
+  arms = c(paste(levels(study_a$exposure_group), collapse = " / "),
+           paste(levels(study_b$exposure_group), collapse = " / "))
+) |> kable()
+```
+
+## Face validity
+
+A simulation is only useful if it produces what it claims to produce. These checks are
+assertions, not printouts: if the generator drifts, the notebook fails to render rather
+than quietly publishing a wrong result.
+
+### Study A: event rates and follow-up
+
+```{r}
+#| label: check-a-rates
+a_valid <- study_a[study_a$followup_time_1 > 0 & study_a$followup_time_2 > 0, ]
+
+rates_a <- data.frame(
+  endpoint = c("Outcome 1", "Outcome 2"),
+  events = c(sum(a_valid$outcome_1), sum(a_valid$outcome_2)),
+  event_rate = round(c(mean(a_valid$outcome_1), mean(a_valid$outcome_2)), 4),
+  median_followup = round(c(median(a_valid$followup_time_1),
+                            median(a_valid$followup_time_2)), 2)
+)
+kable(rates_a)
+
+stopifnot(rates_a$events > 500)
+```
+
+### Study A: the exposure is genuinely confounded
+
+If treatment were assigned at random, the unadjusted and adjusted hazard ratios would
+agree and there would be nothing for a propensity score to do.
+
+```{r}
+#| label: check-a-confounding
+adj_formula <- reformulate(
+  c(GROUP_VAR, "I((demo_age - 65)/10)", "demo_sex",
+    "clinical_binary_1", "clinical_binary_2", "clinical_binary_4",
+    "clinical_binary_6", "I((clinical_continuous_1 - 80)/10)"),
+  response = "Surv(followup_time_1, outcome_1)"
+)
+
+fit_unadj <- coxph(Surv(followup_time_1, outcome_1) ~ exposure_group, data = a_valid)
+fit_adj   <- coxph(adj_formula, data = a_valid)
+
+true_hr_1 <- exp(TRUE_A_OUTCOME_1[["treat"]])
+
+data.frame(
+  model = c("Unadjusted", "Fully adjusted", "Truth"),
+  hr = round(c(exp(coef(fit_unadj))[1], exp(coef(fit_adj))[1], true_hr_1), 3)
+) |> kable()
+```
+
+The unadjusted estimate sits close to the null while the true hazard ratio is clearly
+protective. Confounding here does not merely bias the estimate — it hides the effect
+entirely. That is the situation the rest of Study A exists to handle.
+
+```{r}
+#| label: assert-a
+# The adjusted model must land near the truth; the unadjusted one must not.
+stopifnot(
+  abs(log(exp(coef(fit_adj))[1]) - log(true_hr_1)) < 0.10,
+  exp(coef(fit_unadj))[1] > exp(coef(fit_adj))[1] + 0.10
+)
+```
+
+### Study B: competing-risk structure
+
+```{r}
+#| label: check-b
+b_prepared <- prepare_outcome_data(study_b)
+
+status_tbl <- as.data.frame(table(b_prepared$cr_status))
+names(status_tbl) <- c("status", "n")
+status_tbl$percent <- round(100 * status_tbl$n / nrow(b_prepared), 2)
+kable(status_tbl)
+```
+
+```{r}
+#| label: check-b-hr
+cs_formula <- reformulate(
+  c(GROUP_VAR, "I((demo_age - 65)/10)", "demo_sex", "clinical_binary_1",
+    "clinical_binary_3", "I((clinical_continuous_1 - 80)/10)"),
+  response = "Surv(fu_years, cs_event)"
+)
+fit_cs <- coxph(cs_formula, data = b_prepared)
+
+data.frame(
+  model = c("Cause-specific, unadjusted", "Cause-specific, adjusted", "Truth"),
+  hr = round(c(
+    exp(coef(coxph(Surv(fu_years, cs_event) ~ exposure_group, data = b_prepared)))[1],
+    exp(coef(fit_cs))[1],
+    exp(TRUE_B_EVENT[["treat"]])
+  ), 3)
+) |> kable()
+
+stopifnot(abs(log(exp(coef(fit_cs))[1]) - TRUE_B_EVENT[["treat"]]) < 0.12)
+```
+
+### The injected defects
+
+```{r}
+#| label: check-defects
+data.frame(
+  defect = c("Race coded as the literal string \"null\"",
+             "Negative follow-up time, outcome 1",
+             "Negative follow-up time, outcome 2",
+             "Death date rounded back before index date (Study B)"),
+  n = c(sum(study_a$demo_race == "null"),
+        sum(study_a$followup_time_1 < 0),
+        sum(study_a$followup_time_2 < 0),
+        attr(b_prepared, "n_death_dates_clamped"))
+) |> kable()
+
+stopifnot(sum(study_a$demo_race == "null") > 0,
+          sum(study_a$followup_time_1 < 0) > 0)
+```
+
+Each of these forces a decision that a clean dataset would let you skip.
+
+`"null"` is a string, not `NA`, so it survives a naive read and only announces itself
+when a factor gains an unexpected level. Treating it as a category, dropping it, or
+recoding it to missing are all defensible — silently coercing it to `NA` via
+`as.numeric()` is not, because it is indistinguishable from data that was never
+collected.
+
+Negative follow-up times cannot be right and have to be removed before modelling, with
+the count reported rather than absorbed.
+
+The clamped death dates are a consequence of month precision: a death recorded in the
+same month as enrolment rounds back to the first of that month, which can fall before
+the index date. A death cannot precede enrolment, so the date is clamped forward and the
+count is reported. This is the first sign of an issue that
+[the competing-risks notebook](05-competing-risks.qmd) returns to.
+
+## What gets cached
+
+```{r}
+#| label: cache
+data.frame(
+  file = c(PATHS$study_a, PATHS$study_b),
+  rows = c(nrow(study_a), nrow(study_b)),
+  size_kb = round(c(file.size(PATHS$study_a), file.size(PATHS$study_b)) / 1024, 1)
+) |> kable()
+```
+
+Both files are derived from a fixed seed and are not tracked in version control.
+Deleting `data/synthetic/` and re-rendering reproduces them exactly.

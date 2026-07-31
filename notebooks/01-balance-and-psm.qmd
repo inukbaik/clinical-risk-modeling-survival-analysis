@@ -1,0 +1,367 @@
+---
+title: "Balance and propensity score matching"
+subtitle: "Problem 1 — matching ran, but it did not balance"
+---
+
+```{r}
+#| label: setup
+source("R/setup.R")
+library(MatchIt)
+library(tableone)
+library(cobalt)
+library(knitr)
+
+study_a <- clean_study_a(load_study("a"))
+```
+
+## The problem
+
+The first propensity score match ran without error, returned a matched cohort, and
+produced a balance table that looked broadly reasonable. Several covariates were still
+imbalanced past the conventional threshold.
+
+The failure mode is worth naming precisely, because it is silent: `matchit()` will
+always return matched pairs. Nearest-neighbour matching finds the closest available
+control for each treated subject whether or not that control is *close*. Without a
+caliper, "closest available" can be arbitrarily far away. Nothing errors, nothing warns,
+and the output has the shape you expected.
+
+So the check has to be explicit, and it has to happen every time.
+
+## Attrition
+
+```{r}
+#| label: attrition
+kable(attr(study_a, "attrition"))
+```
+
+Race is kept as an explicit `Missing` category rather than dropped. Dropping those
+subjects would assume the missingness is unrelated to everything else; keeping it as a
+level makes no such assumption and lets the balance table show whether the two arms
+differ in how often it occurs.
+
+## How balance is judged
+
+The absolute standardized mean difference, with 0.10 as the threshold and 0.05 as
+comfortable. Not a hypothesis test.
+
+At `r format(nrow(study_a), big.mark = ",")` subjects, a t-test has enough power to
+flag differences far too small to bias anything. A significant imbalance and a
+meaningful imbalance are different claims, and only the second one matters here. The SMD
+is also unitless and unaffected by sample size, so the same threshold means the same
+thing in the full cohort and in a subgroup.
+
+One implementation note that costs people time: in `tableone`, `smd` is an argument to
+`print()`, not to `CreateTableOne()`. Passing it to the latter silently does nothing.
+
+```{r}
+#| label: table1
+tab1 <- CreateTableOne(
+  vars = BASELINE_PREDICTORS, strata = GROUP_VAR,
+  data = study_a, test = FALSE, addOverall = TRUE
+)
+print(tab1, smd = TRUE, showAllLevels = TRUE, printToggle = FALSE) |>
+  as.data.frame() |> kable()
+```
+
+## Before matching
+
+```{r}
+#| label: pre-balance
+pre_balance <- balance_table(study_a, GROUP_VAR, BASELINE_PREDICTORS)
+pre_balance[order(-pre_balance$abs_smd), ] |> kable(row.names = FALSE, digits = 4)
+```
+
+```{r}
+#| label: pre-summary
+n_pre_imbalanced <- sum(!pre_balance$balanced)
+```
+
+`r n_pre_imbalanced` covariate rows exceed the threshold before matching, led by
+`demo_age` and `clinical_binary_1` — the covariates that drive treatment assignment most
+strongly.
+
+`clinical_continuous_1` is also imbalanced, and it is a special case. It is not in the
+propensity model, because it sits on the causal pathway: conditioning on it would adjust
+away part of the effect being estimated. But it still has to *balance*, and matching can
+only move it indirectly, through its correlation with the covariates that are in the
+model. A covariate you cannot match on but must still balance is the one most likely to
+decide whether a design works.
+
+## Attempt 1 — nearest neighbour, no caliper
+
+```{r}
+#| label: match-naive
+set.seed(PROJECT_SEED)
+m_naive <- matchit(
+  reformulate(PS_FORMULA_VARS, response = GROUP_VAR),
+  data = study_a, method = "nearest", distance = "glm", ratio = 1
+)
+md_naive <- match.data(m_naive)
+
+denoms <- balance_denominators(study_a, GROUP_VAR, BASELINE_PREDICTORS)
+bal_naive <- balance_table(md_naive, GROUP_VAR, BASELINE_PREDICTORS, denoms = denoms)
+bal_naive[order(-bal_naive$abs_smd), ] |> kable(row.names = FALSE, digits = 4)
+```
+
+```{r}
+#| label: naive-verdict
+data.frame(
+  quantity = c("Matched subjects", "Percent of cohort retained",
+               "Covariate rows still imbalanced",
+               "Largest absolute SMD — before matching",
+               "Largest absolute SMD — after matching"),
+  value = c(format(nrow(md_naive), big.mark = ","),
+            paste0(round(100 * nrow(md_naive) / nrow(study_a), 1), "%"),
+            sum(!bal_naive$balanced),
+            round(max(pre_balance$abs_smd), 4),
+            round(max(bal_naive$abs_smd), 4))
+) |> kable()
+```
+
+Matching without a caliper made balance **worse**. The largest absolute SMD rose from
+`r round(max(pre_balance$abs_smd), 3)` before matching to
+`r round(max(bal_naive$abs_smd), 3)` after it, and `demo_age` — the strongest driver of
+treatment assignment — is further apart in the matched cohort than it was in the full
+one.
+
+That is not a paradox. Almost nobody was discarded
+(`r round(100 * nrow(md_naive) / nrow(study_a), 1)`% retained), so every treated subject
+was paired with whatever control was nearest, however far away that was. Nearest-neighbour
+matching without a caliper is greedy: it works through the treated subjects in order, and
+by the end the only controls left are the poor ones. The result is a cohort that has been
+reshaped without being balanced.
+
+This is the failure the notebook is named for. Nothing errored. The object has the right
+class, the table has the right shape, and the sample size looks generous. The only way to
+find out is to compute the balance table and read it.
+
+```{r}
+#| label: assert-naive-worse
+# Lock the finding: an uncalipered match is not merely inadequate here, it is
+# actively worse than doing nothing.
+stopifnot(max(bal_naive$abs_smd) > max(pre_balance$abs_smd))
+```
+
+One detail that decides whether that table is trustworthy: the SMDs here use the
+*pre-match* pooled standard deviations (`denoms`). Recomputing the denominator inside the
+matched cohort is a quiet way to make balance look better than it is, because matching
+narrows the covariate distributions and a smaller denominator shrinks every SMD. Before
+and after have to be on one scale to be comparable.
+
+## Attempt 2 — a fixed caliper
+
+The standard next move is a caliper on the propensity score, expressed in standard
+deviations of the linear predictor.
+
+```{r}
+#| label: match-fixed
+set.seed(PROJECT_SEED)
+m_fixed <- matchit(
+  reformulate(PS_FORMULA_VARS, response = GROUP_VAR),
+  data = study_a, method = "nearest", distance = "glm", ratio = 1,
+  caliper = 0.20, std.caliper = TRUE
+)
+md_fixed <- match.data(m_fixed)
+bal_fixed <- balance_table(md_fixed, GROUP_VAR, BASELINE_PREDICTORS, denoms = denoms)
+
+data.frame(
+  quantity = c("Matched subjects", "Percent of cohort retained",
+               "Covariates still imbalanced", "Largest absolute SMD"),
+  value = c(format(nrow(md_fixed), big.mark = ","),
+            paste0(round(100 * nrow(md_fixed) / nrow(study_a), 1), "%"),
+            sum(!bal_fixed$balanced),
+            round(max(bal_fixed$abs_smd), 4))
+) |> kable()
+```
+
+```{r}
+#| label: fixed-worst
+bal_fixed[order(-bal_fixed$abs_smd), ][1:5, ] |>
+  kable(row.names = FALSE, digits = 4)
+```
+
+Better, and in the original work this is roughly where a first pass stopped. Whether it
+is *good enough* is a question the table has to answer, not the fact that the code ran.
+
+## Attempt 3 — search the caliper instead of guessing it
+
+Rather than trying values by hand, walk a descending grid and take the **loosest**
+caliper that balances every covariate. Direction matters: tighter calipers buy balance
+by discarding subjects, so the loosest one meeting the threshold is the one that keeps
+the most data and the most precision.
+
+Two properties of the search are deliberate. Every attempt is logged, including the
+failures — the log is the evidence that balance was verified rather than assumed. And if
+no caliper in the grid succeeds, the function raises an error instead of returning its
+best failure, because a matched cohort that never achieved balance is worse than no
+matched cohort at all.
+
+```{r}
+#| label: caliper-search
+search <- search_caliper(
+  study_a, treat_var = GROUP_VAR,
+  ps_vars = PS_FORMULA_VARS, balance_vars = BASELINE_PREDICTORS
+)
+kable(search$attempts, row.names = FALSE)
+```
+
+```{r}
+#| label: caliper-selected
+selected  <- search$selected
+md_final  <- selected$matched
+bal_final <- selected$balance
+
+save_table(search$attempts, "psm_caliper_attempts")
+
+data.frame(
+  quantity = c("Selected caliper", "Matched subjects",
+               "Percent of cohort retained", "Largest absolute SMD"),
+  value = c(selected$caliper, format(nrow(md_final), big.mark = ","),
+            paste0(round(100 * nrow(md_final) / nrow(study_a), 1), "%"),
+            round(max(bal_final$abs_smd), 4))
+) |> kable()
+```
+
+```{r}
+#| label: assert-balance
+# The whole point of the notebook: assert both that the selected caliper
+# balances, and that a looser one failed. If nothing failed, the search was
+# not demonstrating anything.
+stopifnot(
+  all(bal_final$balanced),
+  max(bal_final$abs_smd) <= SMD_THRESHOLD,
+  any(!search$attempts$balanced)
+)
+```
+
+### The trade-off, stated plainly
+
+```{r}
+#| label: tradeoff
+#| fig-height: 4
+library(ggplot2)
+
+ggplot(search$attempts, aes(x = caliper)) +
+  geom_line(aes(y = max_abs_smd), linewidth = 0.7) +
+  geom_point(aes(y = max_abs_smd, colour = balanced), size = 2.5) +
+  geom_hline(yintercept = SMD_THRESHOLD, linetype = "dashed") +
+  scale_x_reverse() +
+  scale_colour_manual(values = c(`FALSE` = "#c0392b", `TRUE` = "#27ae60")) +
+  labs(
+    x = "Caliper (standard deviations, tightening to the right)",
+    y = "Largest absolute SMD",
+    colour = "All covariates balanced",
+    title = "Balance improves as the caliper tightens",
+    subtitle = "Dashed line is the 0.10 threshold"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+Every step to the right also discards subjects. The `n_matched` column in the attempt
+log is the price, and reporting it is part of reporting the match — a balanced cohort
+that kept a third of the data is a different result from a balanced cohort that kept
+nearly all of it.
+
+## Balance before and after
+
+```{r}
+#| label: love-plot
+#| fig-height: 6
+love.plot(
+  m_naive, stats = "mean.diffs", abs = TRUE,
+  thresholds = c(m = SMD_THRESHOLD), var.order = "unadjusted",
+  line = TRUE, drop.distance = TRUE,
+  sample.names = c("Unmatched", "No caliper"),
+  title = "Covariate balance, no caliper"
+)
+```
+
+```{r}
+#| label: love-plot-final
+#| fig-height: 6
+love.plot(
+  selected$fit, stats = "mean.diffs", abs = TRUE,
+  thresholds = c(m = SMD_THRESHOLD), var.order = "unadjusted",
+  line = TRUE, drop.distance = TRUE,
+  sample.names = c("Unmatched", paste0("Caliper ", selected$caliper)),
+  title = paste0("Covariate balance, caliper ", selected$caliper)
+)
+```
+
+## Matched Table 1
+
+```{r}
+#| label: table1-matched
+tab1_matched <- CreateTableOne(
+  vars = BASELINE_PREDICTORS, strata = GROUP_VAR,
+  data = md_final, test = FALSE
+)
+print(tab1_matched, smd = TRUE, showAllLevels = TRUE, printToggle = FALSE) |>
+  as.data.frame() |> kable()
+
+save_table(bal_final, "psm_balance_final")
+```
+
+## The age subgroup
+
+The subgroup gets its own match. Subsetting an already-matched cohort down to
+`demo_age >= 65` would carry over pairs formed under the full-cohort propensity score,
+and a score that balances the whole cohort does not balance a subgroup of it — the
+covariate distributions inside the subgroup are different, so the score is fitted on the
+wrong population.
+
+```{r}
+#| label: subgroup
+study_a_65 <- age_subgroup(study_a)
+
+search_65 <- search_caliper(
+  study_a_65, treat_var = GROUP_VAR,
+  ps_vars = PS_FORMULA_VARS, balance_vars = BASELINE_PREDICTORS
+)
+kable(search_65$attempts, row.names = FALSE)
+```
+
+```{r}
+#| label: subgroup-result
+md_65 <- search_65$selected$matched
+save_table(search_65$attempts, "psm_caliper_attempts_age65")
+
+data.frame(
+  cohort = c("Full cohort", "Age >= 65"),
+  n_eligible = c(nrow(study_a), nrow(study_a_65)),
+  selected_caliper = c(selected$caliper, search_65$selected$caliper),
+  n_matched = c(nrow(md_final), nrow(md_65)),
+  max_abs_smd = round(c(max(bal_final$abs_smd),
+                        max(search_65$selected$balance$abs_smd)), 4)
+) |> kable()
+
+stopifnot(all(search_65$selected$balance$balanced))
+```
+
+The two cohorts select different calipers. That is the expected result, not a bug — and
+it is why a caliper carried over from another analysis is a value that happens to have
+worked somewhere else.
+
+## Saving the matched cohorts
+
+```{r}
+#| label: save
+saveRDS(list(full = md_final, age65 = md_65,
+             caliper_full = selected$caliper,
+             caliper_65 = search_65$selected$caliper),
+        file.path(dirname(PATHS$study_a), "study_a_matched.rds"))
+```
+
+## What to carry forward
+
+- Matching that runs is not matching that worked. The only evidence of balance is a
+  balance table computed after the fact, on pre-match denominators.
+- A caliper is a tuning parameter, not a constant. Search it, log every attempt
+  including the failures, and report the sample size each one costs.
+- Fail loudly when no setting achieves balance. Returning the best available failure
+  hands a downstream analysis a cohort that quietly does not support it.
+- Subgroups need their own propensity score and their own caliper.
+
+Next: [the Cox models](02-cox-models.qmd) that use this matched cohort.
