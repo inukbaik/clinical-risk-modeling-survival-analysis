@@ -1,5 +1,0 @@
-"cohort_label","outcome_label","n_total","n_events","n_train","n_train_events","n_tune","best_mtry","best_min_node_size","test_auc"
-"Overall cleaned cohort","Outcome 1",150000,2906,119999,2324,10000,3,30,0.543
-"Overall cleaned cohort","Outcome 2",150000,2683,119999,2146,10000,2,5,0.6399
-"Age 65+ cleaned cohort","Outcome 1",93630,2184,74903,1747,10000,3,20,0.5023
-"Age 65+ cleaned cohort","Outcome 2",93630,2095,74904,1676,10000,3,10,0.6101
