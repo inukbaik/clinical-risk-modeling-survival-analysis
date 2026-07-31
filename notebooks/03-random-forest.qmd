@@ -15,8 +15,12 @@ library(ggplot2)
 library(knitr)
 
 study_a <- clean_study_a(load_study("a"))
-matched <- readRDS(file.path(dirname(PATHS$study_a), "study_a_matched.rds"))
-md_full <- matched$full
+matched <- require_stage_input(
+  file.path(dirname(PATHS$study_a), "study_a_matched.rds"),
+  produced_by = "notebooks/01-balance-and-psm.qmd"
+)
+md_full <- require_schema(matched$full, schema_for("study_a_matched"),
+                          stage = "Study A random forest")
 ```
 
 ## The problem
@@ -67,15 +71,35 @@ post-baseline indicator, the record identifier, and the `MatchIt` artifacts
 model reconstruct the matching.
 
 ```{r}
-#| label: assert-leakage
-forbidden <- c(ID_VAR, "outcome_1", "outcome_2",
-               "followup_time_1", "followup_time_2",
-               "post_baseline_indicator", MATCHIT_ARTIFACT_VARS)
+#| label: contract
+#| output: asis
+contract_rf <- analysis_contract(
+  question = "Which baseline characteristics identify patients at high risk of the outcome?",
+  estimand = paste(
+    "A ranking of predictors by permutation importance -- how much each one",
+    "contributes to out-of-sample prediction. Not an effect size."
+  ),
+  population = "Model A: the full cleaned cohort. Model B: the matched cohort.",
+  estimator = "Random forest via ranger, 5-fold cross-validated, evaluated on a held-out split.",
+  causal = FALSE,
+  requires = c("no_leakage", "events")
+)
 
+status_rf <- validate_contract(contract_rf, evidence = list(
+  predictors   = union(predictors_a, predictors_b),
+  n_events     = sum(study_a$outcome_1),
+  n_covariates = length(predictors_b)
+))
+
+contract_block(contract_rf, status_rf)
+```
+
+```{r}
+#| label: assert-predictor-sets
+# Postcondition: the two designs must differ by exactly the treatment
+# variable and nothing else, or the comparison below is not the comparison
+# the notebook claims to be making.
 stopifnot(
-  length(intersect(predictors_a, forbidden)) == 0,
-  length(intersect(predictors_b, forbidden)) == 0,
-  # The two sets differ by exactly the treatment variable.
   identical(setdiff(predictors_b, predictors_a), GROUP_VAR),
   length(setdiff(predictors_a, predictors_b)) == 0
 )

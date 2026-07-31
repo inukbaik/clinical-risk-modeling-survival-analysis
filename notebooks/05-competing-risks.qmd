@@ -10,11 +10,12 @@ library(survival)
 library(ggplot2)
 library(knitr)
 
-weighted_path <- file.path(dirname(PATHS$study_b), "study_b_weighted.rds")
-if (!file.exists(weighted_path)) {
-  stop("Run notebooks/04-overlap-weighting.qmd first — it produces the weights.")
-}
-study_b <- readRDS(weighted_path)
+study_b <- require_stage_input(
+  file.path(dirname(PATHS$study_b), "study_b_weighted.rds"),
+  produced_by = "notebooks/04-overlap-weighting.qmd"
+)
+study_b <- require_schema(study_b, schema_for("study_b_weighted"),
+                          stage = "Study B competing risks")
 ```
 
 ## The problem
@@ -43,6 +44,109 @@ kable(status_tbl)
 Competing deaths outnumber events by roughly
 `r round(sum(analysis$cr_status == "death_before_event") / sum(analysis$cr_status == "event"), 1)`
 to one. This is not a setting where the competing risk can be waved away.
+
+## What this analysis is for
+
+```{r}
+#| label: contract
+#| output: asis
+contract_cr <- analysis_contract(
+  question = paste(
+    "In patients starting", STUDY_B_GROUP_LEVELS[1], "or", STUDY_B_GROUP_LEVELS[2],
+    "-- does", STUDY_B_GROUP_LEVELS[2], "change the probability of experiencing",
+    "the event within", STUDY_B_HORIZON_YEARS,
+    "years, given that death prevents it from ever happening?"
+  ),
+  estimand = paste(
+    "Subdistribution hazard ratio -- the quantity that maps onto a contrast in",
+    "cumulative incidence, rather than a rate among survivors."
+  ),
+  population = paste(
+    "The overlap-weighted population: subjects who could plausibly have",
+    "received either treatment. Not the full source cohort."
+  ),
+  estimator = paste(
+    "Fine-Gray model, overlap-weighted, with id = record_id and robust = TRUE",
+    "for the repeated rows the expansion creates."
+  ),
+  causal = TRUE,
+  requires = c("balance", "positivity", "events", "competing_risk")
+)
+
+treat_b <- as.integer(analysis$exposure_group == STUDY_B_GROUP_LEVELS[2])
+
+# The balance gate is scoped to the covariates the design commits to
+# balancing: those in the propensity model. See the note below on the one
+# covariate deliberately left out of it.
+status_cr <- validate_contract(contract_cr, evidence = list(
+  balance      = balance_table(analysis, GROUP_VAR, PS_FORMULA_VARS,
+                               weights = analysis$overlap_w),
+  ps           = analysis$ps,
+  treat        = treat_b,
+  n_events     = sum(analysis$cs_event),
+  n_covariates = 1,
+  status       = analysis$cr_status
+))
+
+contract_block(contract_cr, status_cr)
+```
+
+The question names the competing event explicitly, and that is what forces the choice of
+estimand. "Does the drug change the probability of the event" is a question about
+cumulative incidence, and the subdistribution hazard is the quantity that maps onto it. A
+cause-specific hazard ratio answers a different question — the rate among those still
+alive — and reporting one while claiming the other is the substitution this notebook
+exists to avoid.
+
+The `competing_risk` gate is not decoration: it fails if the competing event is absent
+from the data, which is exactly the situation in which someone would reach for a standard
+survival model without noticing the question had changed underneath them.
+
+### What the balance gate does and does not cover
+
+The gate above is scoped to the covariates in the propensity model. That scope is a
+decision, and writing it down is the point of having a contract at all — so here is what
+it excludes and why.
+
+```{r}
+#| label: mediator-balance
+med_unw <- balance_table(analysis, GROUP_VAR, BASELINE_PREDICTORS)
+med_wt  <- balance_table(analysis, GROUP_VAR, BASELINE_PREDICTORS,
+                         weights = analysis$overlap_w)
+pick <- function(tbl) tbl$abs_smd[tbl$covariate == CLINICAL_CONTINUOUS_VAR]
+
+data.frame(
+  covariate_set = c("In the propensity model", "The excluded mediator"),
+  n = c(length(PS_FORMULA_VARS), 1),
+  unweighted_max_smd = round(c(
+    max(balance_table(analysis, GROUP_VAR, PS_FORMULA_VARS)$abs_smd),
+    pick(med_unw)), 3),
+  weighted_max_smd = round(c(
+    max(balance_table(analysis, GROUP_VAR, PS_FORMULA_VARS,
+                      weights = analysis$overlap_w)$abs_smd),
+    pick(med_wt)), 3)
+) |> kable(row.names = FALSE,
+           col.names = c("Covariate set", "N", "Unweighted max |SMD|",
+                         "Weighted max |SMD|"))
+```
+
+`clinical_continuous_1` sits on the causal pathway, so it is excluded from the propensity
+model on purpose: conditioning on it would adjust away part of the effect being estimated.
+Overlap weighting balances the covariates it is given **exactly**, and gives no guarantee
+about anything else. The mediator improves from
+`r round(pick(med_unw), 3)` to `r round(pick(med_wt), 3)` as a side effect of balancing its
+correlates, and stays above the 0.10 threshold.
+
+That residual imbalance is expected and is not something to fix. Adjusting it away would
+answer a different question — the effect *not* operating through this variable — which is
+not what was asked.
+
+It is worth contrasting with [Study A](01-balance-and-psm.qmd), where the same mediator was
+excluded from the propensity model but still came in under threshold after matching.
+Matching pairs subjects who are close on the whole covariate profile, so a variable
+correlated with the matching set tends to come along; weighting has no such incidental
+effect. Same covariate, same exclusion, different designs, different outcomes — which is
+why the gate names the scope it checks instead of implying it covers everything.
 
 ## The event definition comes first
 
@@ -412,18 +516,28 @@ ggplot(sens_display, aes(x = estimate, y = analysis)) +
 ```
 
 ```{r}
-#| label: assert-consistency
-# Every sensitivity analysis must land on the same side of the null as the
-# primary. A disagreement here would be a finding, not a formatting problem.
+#| label: report-consistency
+#| output: asis
+# Agreement between the sensitivity analyses and the primary estimate is a
+# property of the data, not of the code. It is reported, never asserted: a
+# divergence is the most informative thing this analysis could surface, and a
+# pipeline that halted on it would suppress exactly the result worth
+# investigating. Contrast with the contract gates above, which do stop --
+# those describe whether the analysis is capable of answering its question.
 primary_est <- sens$estimate[sens$analysis == "Primary (3-year horizon, overlap weights)"]
-stopifnot(all((sens$estimate < 1) == (primary_est < 1)))
+agreement <- report_agreement(sens$estimate, sens$analysis, reference = primary_est)
 ```
 
-Every analysis points the same direction. The multivariable-adjusted model is the one
-worth reading separately: it controls confounding by regression rather than by weighting,
-and it estimates a conditional rather than a marginal effect, so it is not expected to
-reproduce the primary estimate exactly — only to agree with it in direction and rough
-magnitude.
+```{r}
+#| label: agreement-table
+kable(agreement, row.names = FALSE,
+      col.names = c("Analysis", "sHR", "Side of null", "Agrees with primary"))
+```
+
+The multivariable-adjusted model is the one worth reading separately: it controls
+confounding by regression rather than by weighting, and it estimates a conditional rather
+than a marginal effect, so it is not expected to reproduce the primary estimate exactly —
+only to agree with it in direction and rough magnitude.
 
 ## Proportional hazards
 

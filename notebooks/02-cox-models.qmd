@@ -11,8 +11,12 @@ library(survminer)
 library(knitr)
 
 study_a <- clean_study_a(load_study("a"))
-matched <- readRDS(file.path(dirname(PATHS$study_a), "study_a_matched.rds"))
-md_full <- matched$full
+matched <- require_stage_input(
+  file.path(dirname(PATHS$study_a), "study_a_matched.rds"),
+  produced_by = "notebooks/01-balance-and-psm.qmd"
+)
+md_full <- require_schema(matched$full, schema_for("study_a_matched"),
+                          stage = "Study A outcome models")
 md_65   <- matched$age65
 ```
 
@@ -20,6 +24,52 @@ This notebook takes the matched cohort from
 [the previous step](01-balance-and-psm.qmd) and estimates the treatment effect. Because
 the data is simulated, each estimate can be compared against the hazard ratio that
 generated it — which is the check the original analysis had no way to perform.
+
+## What this analysis is for
+
+Before fitting anything, the notebook states the question it is answering and checks that
+the design can answer it. The gates run once, here, rather than being scattered through
+the fitting code — a violation then surfaces at the boundary where it was introduced
+instead of as a confusing result further downstream.
+
+This matters because an unmet precondition does not stop a model from producing a number.
+A cohort that never achieved balance still yields a clean-looking hazard ratio with a
+tight interval, and nothing in the output announces that it does not mean what the
+question asks.
+
+```{r}
+#| label: contract
+#| output: asis
+contract_cox <- analysis_contract(
+  question = paste(
+    "In patients starting", STUDY_A_GROUP_LEVELS[1], "or", STUDY_A_GROUP_LEVELS[2],
+    "-- does", STUDY_A_GROUP_LEVELS[2],
+    "change the rate at which the outcome occurs over follow-up?"
+  ),
+  estimand = paste(
+    "Hazard ratio for", STUDY_A_GROUP_LEVELS[2], "versus", STUDY_A_GROUP_LEVELS[1],
+    "-- a ratio of event rates among those still at risk."
+  ),
+  population = paste(
+    "Subjects retained by the propensity score match: those with a counterpart",
+    "in the other arm inside the selected caliper. Not the full source cohort."
+  ),
+  estimator = "Cox proportional hazards, with cluster(subclass) for matched-pair dependence.",
+  causal = TRUE,
+  requires = c("balance", "events", "no_leakage")
+)
+
+denoms_full <- balance_denominators(study_a, GROUP_VAR, BASELINE_PREDICTORS)
+status_cox <- validate_contract(contract_cox, evidence = list(
+  balance      = balance_table(md_full, GROUP_VAR, BASELINE_PREDICTORS,
+                               denoms = denoms_full),
+  n_events     = sum(md_full$outcome_1),
+  n_covariates = length(BASELINE_PREDICTORS),
+  predictors   = c(GROUP_VAR, BASELINE_PREDICTORS)
+))
+
+contract_block(contract_cox, status_cox)
+```
 
 ## The adjustment ladder
 

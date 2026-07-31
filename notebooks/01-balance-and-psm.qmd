@@ -11,7 +11,11 @@ library(tableone)
 library(cobalt)
 library(knitr)
 
-study_a <- clean_study_a(load_study("a"))
+study_a <- require_schema(
+  clean_study_a(load_study("a")),
+  schema_for("study_a_clean"),
+  stage = "Study A balance and matching"
+)
 ```
 
 ## The problem

@@ -19,6 +19,16 @@ for (v in CLINICAL_BINARY_VARS) {
   study_b[[v]] <- factor(study_b[[v]], levels = c(0, 1))
 }
 study_b$exposure_group <- factor(study_b$exposure_group, levels = STUDY_B_GROUP_LEVELS)
+
+# Schema check at the seam. The weighting columns do not exist yet, so this
+# validates the baseline block only -- the full study_b_weighted contract is
+# checked where the next notebook receives this file.
+require_schema(
+  study_b,
+  schema_for("study_b_weighted")[c(ID_VAR, GROUP_VAR, BASELINE_PREDICTORS,
+                                   "baseline_date", "last_fu_date")],
+  stage = "Study B weighting"
+)
 ```
 
 ## Why the design changed
