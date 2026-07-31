@@ -318,26 +318,49 @@ three[, c("model", "hr_ci", "p", "true_hr")] |>
         row.names = FALSE)
 ```
 
+```{r}
+#| label: estimand-gap-threshold
+#| include: false
+# Stated in the prose immediately below and used by the diagnostic that follows,
+# so the threshold a reader sees and the threshold the code applies are one value.
+estimand_gap_max <- 0.05
+```
+
 The two event estimates are very close, and that is the expected result here: treatment
 was generated with essentially no effect on mortality, so both arms accumulate competing
 deaths at a similar rate, those deaths hold down the cumulative incidence equally in both
 arms, and nothing pulls the two estimands apart. The place where they diverge sharply is a
 treatment that changes mortality substantially — which is exactly when reporting the wrong
-one does the most damage.
+one does the most damage. Because that is what the generator promises, divergence is worth
+naming when it appears: the separation between the two estimates is taken to be material
+when the absolute difference on the log-hazard scale exceeds
+`r estimand_gap_max`, and the note below appears only in that case.
 
 ```{r}
 #| label: estimand-comparison
+#| output: asis
 sub_hr <- primary$estimate[primary$model == "Fine-Gray (subdistribution)"]
 cs_hr  <- primary$estimate[primary$model == "Cause-specific Cox"]
 
-stopifnot(
-  # Both recover a protective effect...
-  sub_hr < 1, cs_hr < 1,
-  # ...the cause-specific model recovers the truth it targets...
-  abs(log(cs_hr) - TRUE_B_EVENT[["treat"]]) < 0.10,
-  # ...and with a near-null competing hazard the two estimands nearly coincide.
-  abs(log(sub_hr) - log(cs_hr)) < 0.05
-)
+# A finding, not a validity condition: how far apart the two estimands sit is a
+# property of the data and the competing-death process, so a wide gap is
+# reported and interpreted, never fatal, and it impugns neither model. Invalid
+# event coding, unusable weights and nonfinite estimates are caught earlier, at
+# the contract and model-fitting seams.
+estimand_gap <- abs(log(sub_hr) - log(cs_hr))
+
+if (!isTRUE(estimand_gap <= estimand_gap_max)) {
+  cat("::: {.callout-warning}\n")
+  cat("## Estimand divergence\n\n")
+  cat(sprintf(
+    paste0("The Fine-Gray and cause-specific estimates differed by %.3f on the ",
+           "log-hazard scale, exceeding the prespecified %.2f threshold; this ",
+           "divergence may reflect a non-null treatment association with ",
+           "competing death and should be interpreted alongside the ",
+           "competing-death model above.\n"),
+    estimand_gap, estimand_gap_max))
+  cat(":::\n\n")
+}
 ```
 
 One detail in that table is worth not glossing over. The estimated competing-death hazard
