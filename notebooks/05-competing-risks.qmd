@@ -1,0 +1,493 @@
+---
+title: "Competing risks"
+subtitle: "Problem 3 — the Fine-Gray model, and the sensitivity analyses around it"
+---
+
+```{r}
+#| label: setup
+source("R/setup.R")
+library(survival)
+library(ggplot2)
+library(knitr)
+
+weighted_path <- file.path(dirname(PATHS$study_b), "study_b_weighted.rds")
+if (!file.exists(weighted_path)) {
+  stop("Run notebooks/04-overlap-weighting.qmd first — it produces the weights.")
+}
+study_b <- readRDS(weighted_path)
+```
+
+## The problem
+
+Death competes with the outcome of interest. A subject who dies can never go on to have
+the event, so they are not "still at risk" in any meaningful sense — but a standard
+survival analysis treats them exactly as it treats someone who moved away or reached the
+end of the study. Censoring a death implicitly assumes the subject would have gone on to
+experience the event at the same rate as everyone still under observation, which for a
+dead subject is false.
+
+The consequence is a cumulative incidence that is too high, and it is worst precisely
+where deaths are most common — in older and sicker subgroups, and in comparisons where
+the two arms have different mortality.
+
+```{r}
+#| label: prepare
+analysis <- prepare_outcome_data(study_b)
+
+status_tbl <- as.data.frame(table(analysis$cr_status))
+names(status_tbl) <- c("status", "n")
+status_tbl$percent <- round(100 * status_tbl$n / nrow(analysis), 2)
+kable(status_tbl)
+```
+
+Competing deaths outnumber events by roughly
+`r round(sum(analysis$cr_status == "death_before_event") / sum(analysis$cr_status == "event"), 1)`
+to one. This is not a setting where the competing risk can be waved away.
+
+## The event definition comes first
+
+Before any model, the classification rule has to be settled, because everything
+downstream inherits it. There is one function that decides it, so there is one place to
+look.
+
+```{r}
+#| label: tie-rule-code
+#| eval: false
+# From R/simulate.R
+derive_cr_status <- function(event_date, death_month_date,
+                             tie_rule = c("event_wins", "death_wins")) {
+  before <- if (tie_rule == "event_wins") {
+    event_date <= death_month_date   # an event on the death date counts as an event
+  } else {
+    event_date <  death_month_date   # ... or as a competing death
+  }
+  ...
+}
+```
+
+The reason a tie rule is needed at all is a property of the data rather than of the
+statistics. Death is recorded at **month precision** — every death date has a day
+component of 01 — while the event of interest carries true day precision. So an event
+recorded on the first of the month in which someone died lands on exactly the same date
+as their death, and the comparison has to say which one wins.
+
+```{r}
+#| label: tie-analysis
+strict <- prepare_outcome_data(study_b, tie_rule = "death_wins")
+
+n_ties <- sum(analysis$cr_status != strict$cr_status)
+
+raw_both <- !is.na(study_b$event_date) & !is.na(study_b$death_month_date)
+n_inverted <- sum(study_b$.true_event_first == 1 & raw_both &
+                    study_b$event_date > study_b$death_month_date)
+
+data.frame(
+  quantity = c("Subjects whose status changes under the strict rule",
+               "Subjects with event and death in the same month",
+               "Subjects whose true ordering is inverted by month rounding"),
+  n = c(n_ties,
+        sum(raw_both & format(study_b$event_date, "%Y-%m") ==
+              format(study_b$death_month_date, "%Y-%m")),
+        n_inverted)
+) |> kable()
+```
+
+The honest result here is that the tie rule moves very few subjects — `r n_ties` in this
+cohort. That is worth reporting rather than dressing up, and it is not an argument for
+skipping the check: the number could not be known without computing it, and a
+specification that leaves the rule implicit is one where two analysts get different
+answers and neither can say why.
+
+The more consequential finding is the third row. Month-precision rounding pushes the
+recorded death date *earlier*, so `r n_inverted` subjects whose event genuinely came first
+have a recorded event date that falls after their recorded death date. Those subjects are
+classified as competing deaths under **both** rules. The tie rule cannot fix this, because
+it is not a tie — it is a rounding artifact that inverts the true ordering, and the only
+real remedy is a death date with day precision.
+
+```{r}
+#| label: tie-invariance
+# Follow-up time is bounded by the minimum over both dates symmetrically, so
+# the tie rule can change the label attached to a subject but never the time.
+stopifnot(identical(round(analysis$fu_years, 10), round(strict$fu_years, 10)))
+```
+
+That the tie rule cannot change follow-up time is worth asserting rather than assuming.
+It means the rule affects only the classification, and no downstream time-to-event
+quantity moves underneath it.
+
+## The Fine-Gray model
+
+Two hazards can be estimated here, and they answer different questions.
+
+The **cause-specific** hazard asks: among those still alive and event-free, what is the
+rate of the event? It is the right quantity for questions about biological mechanism.
+
+The **subdistribution** hazard, which the Fine-Gray model estimates, keeps subjects who
+died in the risk set with a declining weight. That sounds strange as a description of who
+is at risk, and it is — but it is what makes the coefficient map directly onto the
+cumulative incidence function. It is the right quantity for questions about what
+proportion of patients will actually experience the event.
+
+```{r}
+#| label: finegray
+# ow and record_id appear on the right-hand side purely so finegray() carries
+# them into the expanded dataset. Neither is a predictor.
+fg_data <- finegray(
+  Surv(fu_years, cr_status) ~ exposure_group + overlap_w + record_id,
+  data = analysis, etype = "event"
+)
+
+# The censoring weight from the Fine-Gray expansion multiplies the overlap
+# weight: one handles the competing risk, the other handles confounding.
+fg_data$analysis_weight <- fg_data$fgwt * fg_data$overlap_w
+
+data.frame(
+  quantity = c("Subjects before expansion", "Rows after expansion",
+               "Row inflation", "Distinct subjects preserved"),
+  value = c(format(nrow(analysis), big.mark = ","),
+            format(nrow(fg_data), big.mark = ","),
+            sprintf("%.1fx", nrow(fg_data) / nrow(analysis)),
+            format(length(unique(fg_data$record_id)), big.mark = ","))
+) |> kable()
+
+stopifnot(
+  length(unique(fg_data$record_id)) == nrow(analysis),
+  all(abs(fg_data$analysis_weight - fg_data$fgwt * fg_data$overlap_w) < 1e-12)
+)
+```
+
+```{r}
+#| label: fg-fit
+fit_fg <- coxph(
+  Surv(fgstart, fgstop, fgstatus) ~ exposure_group,
+  data = fg_data, weights = analysis_weight, id = record_id, robust = TRUE
+)
+
+fit_cs <- coxph(
+  Surv(fu_years, cs_event) ~ exposure_group,
+  data = analysis, weights = overlap_w, id = record_id, robust = TRUE
+)
+
+primary <- rbind(
+  model_result_row(fit_fg, term = 1L, label = "Primary",
+                   model = "Fine-Gray (subdistribution)"),
+  model_result_row(fit_cs, term = 1L, label = "Primary",
+                   model = "Cause-specific Cox")
+)
+primary <- add_display(primary)
+primary$true_cs_hr <- round(exp(TRUE_B_EVENT[["treat"]]), 3)
+
+primary[, c("model", "hr_ci", "p", "true_cs_hr")] |>
+  kable(col.names = c("Model", "HR (95% CI)", "p", "True cause-specific HR"),
+        row.names = FALSE)
+
+save_table(primary, "competing_risks_primary")
+```
+
+### How the two estimates relate
+
+The gap between a subdistribution and a cause-specific hazard ratio is driven by what
+treatment does to the **competing** hazard. So that model has to be fitted too.
+
+```{r}
+#| label: death-model
+analysis$death_event <- as.integer(analysis$cr_status == "death_before_event")
+
+fit_death <- coxph(
+  Surv(fu_years, death_event) ~ exposure_group,
+  data = analysis, weights = overlap_w, id = record_id, robust = TRUE
+)
+
+three <- rbind(
+  primary[, setdiff(names(primary), c("hr_ci", "p", "true_cs_hr"))],
+  model_result_row(fit_death, term = 1L, label = "Primary",
+                   model = "Competing death, cause-specific")
+)
+three <- add_display(three)
+three$true_hr <- c(round(exp(TRUE_B_EVENT[["treat"]]), 3),
+                   round(exp(TRUE_B_EVENT[["treat"]]), 3),
+                   round(exp(TRUE_B_DEATH[["treat"]]), 3))
+
+three[, c("model", "hr_ci", "p", "true_hr")] |>
+  kable(col.names = c("Model", "HR (95% CI)", "p", "True HR"),
+        row.names = FALSE)
+```
+
+The two event estimates are very close, and that is the expected result here: treatment
+was generated with essentially no effect on mortality, so both arms accumulate competing
+deaths at a similar rate, those deaths hold down the cumulative incidence equally in both
+arms, and nothing pulls the two estimands apart. The place where they diverge sharply is a
+treatment that changes mortality substantially — which is exactly when reporting the wrong
+one does the most damage.
+
+```{r}
+#| label: estimand-comparison
+sub_hr <- primary$estimate[primary$model == "Fine-Gray (subdistribution)"]
+cs_hr  <- primary$estimate[primary$model == "Cause-specific Cox"]
+
+stopifnot(
+  # Both recover a protective effect...
+  sub_hr < 1, cs_hr < 1,
+  # ...the cause-specific model recovers the truth it targets...
+  abs(log(cs_hr) - TRUE_B_EVENT[["treat"]]) < 0.10,
+  # ...and with a near-null competing hazard the two estimands nearly coincide.
+  abs(log(sub_hr) - log(cs_hr)) < 0.05
+)
+```
+
+One detail in that table is worth not glossing over. The estimated competing-death hazard
+ratio is `r round(three$estimate[3], 3)`, above 1, while the value used to generate the
+data was `r round(exp(TRUE_B_DEATH[["treat"]]), 3)` — essentially null. This is not a
+weighting failure: the same weights recover the event hazard ratio accurately. It is a
+selection effect. Treatment reduces the event, so treated subjects are censored by the
+event less often and remain at risk for death longer, and the subjects who avoid the event
+are not a random subset — the shared frailty in the data generator makes the ones who
+remain systematically frailer.
+
+That is a general hazard of reading cause-specific models of the *competing* event as if
+they were causal: the risk set has been shaped by the treatment's effect on the other
+cause. It is also why the competing-death model belongs in the report as a descriptive
+companion rather than as a second treatment-effect estimate.
+
+Both event estimands are correct answers to different questions. Reporting one and
+describing it as the other is the error to avoid — a paper that says "risk of the event"
+while presenting a cause-specific hazard ratio has made exactly that substitution.
+
+## Why the robust variance
+
+Every model here is fitted with `id = record_id, robust = TRUE`, and every interval and
+p-value is computed from the sandwich variance stored in `fit$var` rather than the
+model-based variance in `fit$naive.var`. Three reasons, all of which apply
+simultaneously.
+
+**Overlap weights are analytic weights, not frequency weights.** `coxph` treats the
+`weights=` argument as though it counted observations — a weight of 3 means three
+identical subjects. That is not what an overlap weight means: it expresses how much a
+subject contributes to a target population, not how many of them there are. The
+model-based variance inherits the frequency-weight interpretation and understates the
+uncertainty accordingly.
+
+**The Fine-Gray expansion produces many rows per subject.** The
+`r sprintf("%.1fx", nrow(fg_data) / nrow(analysis))` inflation above is one subject
+appearing repeatedly across time intervals. Those rows are not independent observations,
+and treating them as such is precisely the error that `id=` plus a sandwich estimator
+exists to correct.
+
+**Consistency across the report.** Mixing estimators between tables produces numbers that
+cannot be compared with each other, and a reader has no way to tell which is which.
+
+The practical consequence is that `summary(fit)` prints both a `se(coef)` and a
+`robust se`, and reading the wrong column produces a different confidence interval and a
+different p-value from the *same fitted model* and the *same coefficient*. This project
+avoids the ambiguity structurally: `model_result_row()` takes the variance source as an
+argument, computes the Wald statistic, interval and p-value from that one source, and
+records which was used in a `se_source` column that travels with the estimate.
+
+```{r}
+#| label: se-provenance
+data.frame(
+  model = primary$model,
+  se_log_hr = round(primary$se_log, 4),
+  se_source = primary$se_source
+) |> kable(row.names = FALSE)
+```
+
+## Sensitivity analyses
+
+A primary estimate on its own says very little. What makes it credible is that the
+analyses around it — different horizons, a different weighting scheme, a different
+confounding-control strategy, a different handling of early events — point the same way.
+If one of them disagreed, that would be the finding.
+
+```{r}
+#| label: sensitivity-helpers
+fit_fg_at <- function(data, label, weight_var = "overlap_w", horizon = NULL) {
+  d <- data
+  if (!is.null(horizon)) {
+    d$cr_status <- as.character(d$cr_status)
+    d$cr_status[d$fu_years > horizon] <- "censored"
+    d$cr_status <- factor(d$cr_status,
+                          levels = c("censored", "event", "death_before_event"))
+    d$fu_years <- pmin(d$fu_years, horizon)
+  }
+  d$.w <- d[[weight_var]]
+
+  fg <- finegray(Surv(fu_years, cr_status) ~ exposure_group + .w + record_id,
+                 data = d, etype = "event")
+  fg$analysis_weight <- fg$fgwt * fg$.w
+
+  fit <- coxph(Surv(fgstart, fgstop, fgstatus) ~ exposure_group,
+               data = fg, weights = analysis_weight, id = record_id,
+               robust = TRUE)
+  model_result_row(fit, term = 1L, label = label, model = "Fine-Gray")
+}
+```
+
+```{r}
+#| label: landmark
+# 180-day landmark. Everyone with follow-up at or below the landmark is
+# excluded and the clock restarts for the rest. Because fu_years is already the
+# time to the first of event, death or loss to follow-up, the single condition
+# removes early events, early deaths and early dropout together.
+lag_years <- STUDY_B_LANDMARK_DAYS / DAYS_PER_YEAR
+keep <- analysis$fu_years > lag_years
+landmark <- analysis[keep, ]
+landmark$fu_years <- landmark$fu_years - lag_years
+
+data.frame(
+  quantity = c("Excluded before the landmark", "Retained", "Events retained"),
+  n = c(sum(!keep), sum(keep), sum(landmark$cr_status == "event"))
+) |> kable()
+
+stopifnot(all(landmark$fu_years > 0),
+          nrow(landmark) + sum(!keep) == nrow(analysis))
+```
+
+The team called this a "180-day lag", but methodologically it is a landmark analysis: the
+cohort is restricted to survivors at day 180 and follow-up is measured from there. It
+addresses reverse causation — events occurring immediately after the index date are
+unlikely to have been caused by a treatment started that day — at the cost of excluding
+everyone with short follow-up.
+
+```{r}
+#| label: sensitivity-run
+sens <- rbind(
+  primary[primary$model == "Fine-Gray (subdistribution)",
+          setdiff(names(primary), c("hr_ci", "p", "true_cs_hr"))] |>
+    transform(analysis = "Primary (3-year horizon, overlap weights)"),
+  fit_fg_at(analysis, "1-year horizon", horizon = 1),
+  fit_fg_at(analysis, "2-year horizon", horizon = 2),
+  fit_fg_at(analysis, "Stabilized IPTW instead of overlap", weight_var = "sw_iptw"),
+  fit_fg_at(landmark, "180-day landmark")
+)
+```
+
+```{r}
+#| label: sensitivity-adjusted
+# A regression-adjusted, unweighted alternative: a different strategy for
+# confounding control rather than a different weight. This is the expensive fit
+# -- the covariates are carried through the expansion.
+adj_terms <- paste(PS_FORMULA_VARS, collapse = " + ")
+fg_adj <- finegray(
+  as.formula(paste("Surv(fu_years, cr_status) ~ exposure_group +",
+                   adj_terms, "+ record_id")),
+  data = analysis, etype = "event"
+)
+fit_adj <- coxph(
+  as.formula(paste("Surv(fgstart, fgstop, fgstatus) ~ exposure_group +", adj_terms)),
+  data = fg_adj, weights = fgwt, id = record_id, robust = TRUE
+)
+
+term_idx <- grep("^exposure_group", names(coef(fit_adj)))[1]
+sens <- rbind(sens, model_result_row(
+  fit_adj, term = term_idx,
+  label = "Multivariable-adjusted, unweighted", model = "Fine-Gray"
+))
+```
+
+```{r}
+#| label: sensitivity-table
+sens_display <- add_display(sens)
+sens_display[, c("analysis", "hr_ci", "p", "se_source")] |>
+  kable(col.names = c("Analysis", "sHR (95% CI)", "p", "Variance"),
+        row.names = FALSE)
+
+save_table(sens, "competing_risks_sensitivity")
+```
+
+```{r}
+#| label: forest
+#| fig-height: 5
+sens_display$analysis <- factor(sens_display$analysis,
+                                levels = rev(sens_display$analysis))
+
+ggplot(sens_display, aes(x = estimate, y = analysis)) +
+  geom_vline(xintercept = 1, colour = "grey60") +
+  geom_pointrange(aes(xmin = ci_lower, xmax = ci_upper), size = 0.4) +
+  scale_x_log10() +
+  labs(x = "Subdistribution hazard ratio (95% CI, log scale)", y = NULL,
+       title = "The primary estimate and the analyses that have to agree with it") +
+  theme_minimal(base_size = 12)
+```
+
+```{r}
+#| label: assert-consistency
+# Every sensitivity analysis must land on the same side of the null as the
+# primary. A disagreement here would be a finding, not a formatting problem.
+primary_est <- sens$estimate[sens$analysis == "Primary (3-year horizon, overlap weights)"]
+stopifnot(all((sens$estimate < 1) == (primary_est < 1)))
+```
+
+Every analysis points the same direction. The multivariable-adjusted model is the one
+worth reading separately: it controls confounding by regression rather than by weighting,
+and it estimates a conditional rather than a marginal effect, so it is not expected to
+reproduce the primary estimate exactly — only to agree with it in direction and rough
+magnitude.
+
+## Proportional hazards
+
+`cox.zph()` is not used on the Fine-Gray fit. Its risk set is artificial by construction —
+subjects who have died remain in it with declining weights — so the scaled Schoenfeld
+residuals it produces have no interpretation as a diagnostic for that model. Instead
+follow-up is split into intervals and a treatment-by-period interaction is tested
+jointly, on the robust covariance.
+
+```{r}
+#| label: ph-test
+ph <- rbind(
+  ph_interval_test(analysis, "fu_years", "cs_event", GROUP_VAR,
+                   weight_var = "overlap_w", id_var = "record_id",
+                   cuts = seq_len(STUDY_B_HORIZON_YEARS - 1),
+                   label = "Cause-specific Cox, overlap weighted")
+)
+ph$p_value <- fmt_p(ph$p_value)
+kable(ph, row.names = FALSE)
+save_table(ph, "competing_risks_ph")
+```
+
+The data were generated from a proportional hazards model, so the assumption genuinely
+holds here and the test agreeing with that is a check on the test rather than a discovery.
+The wording of the conclusion is deliberately weak: a non-significant result is an absence
+of evidence against proportionality, not evidence for it.
+
+## Cumulative incidence
+
+```{r}
+#| label: cif
+#| fig-height: 5
+cif <- survfit(Surv(fu_years, cr_status) ~ exposure_group,
+               data = analysis, weights = overlap_w, id = record_id)
+
+cif_df <- data.frame(
+  time = cif$time,
+  cif = cif$pstate[, which(cif$states == "event")],
+  arm = rep(STUDY_B_GROUP_LEVELS, cif$strata)
+)
+
+ggplot(cif_df, aes(x = time, y = cif, colour = arm)) +
+  geom_step(linewidth = 0.8) +
+  scale_colour_manual(values = c("#2c3e50", "#c0392b")) +
+  labs(x = "Years since index", y = "Cumulative incidence of the event",
+       colour = NULL,
+       title = "Overlap-weighted cumulative incidence, accounting for competing death") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+This curve is what the Fine-Gray coefficient describes. A Kaplan-Meier plot of the same
+data would rise higher in both arms, because it treats every competing death as though the
+subject remained at risk.
+
+## What to carry forward
+
+- Settle the event definition before fitting anything, in one function, and verify how
+  much the choice actually moves. Here the tie rule moves `r n_ties` subjects, and the
+  month-precision rounding underneath it moves more.
+- Cause-specific and subdistribution hazards answer different questions. Report both, and
+  name which one any given number is.
+- Analytic weights and repeated rows per subject both require the robust sandwich
+  variance. Read `fit$var`, not `fit$naive.var`, and record which was used alongside the
+  estimate so the two can never be confused downstream.
+- A primary estimate is only as good as the sensitivity analyses that agree with it.
+- `cox.zph()` has no valid interpretation for a Fine-Gray fit.

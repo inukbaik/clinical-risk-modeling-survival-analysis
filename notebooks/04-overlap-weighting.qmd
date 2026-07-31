@@ -1,0 +1,394 @@
+---
+title: "Overlap weighting"
+subtitle: "Study B — balancing without discarding anyone"
+---
+
+```{r}
+#| label: setup
+source("R/setup.R")
+library(survey)
+library(tableone)
+library(cobalt)
+library(ggplot2)
+library(knitr)
+
+study_b <- load_study("b")
+study_b$demo_race <- factor(study_b$demo_race, levels = c("Group_A", "Group_B"))
+study_b$demo_sex  <- factor(study_b$demo_sex, levels = c(0, 1))
+for (v in CLINICAL_BINARY_VARS) {
+  study_b[[v]] <- factor(study_b[[v]], levels = c(0, 1))
+}
+study_b$exposure_group <- factor(study_b$exposure_group, levels = STUDY_B_GROUP_LEVELS)
+```
+
+## Why the design changed
+
+[Study A](01-balance-and-psm.qmd) achieved balance by tightening a caliper until every
+covariate came in under 0.10 — and paid for it by discarding subjects. That is the
+standard trade: a matched cohort is balanced because the subjects who could not be
+matched are gone.
+
+Weighting takes a different route. Instead of selecting subjects, it reweights them, so
+everyone contributes and balance comes from the weights rather than from exclusion. This
+notebook builds the three weighting schemes, compares what each one costs, and shows why
+overlap weighting was the one carried forward.
+
+## The propensity model
+
+```{r}
+#| label: ps-model
+ps_formula <- reformulate(PS_FORMULA_VARS, response = GROUP_VAR)
+
+ps_fit <- glm(ps_formula, data = study_b, family = binomial())
+if (!ps_fit$converged) stop("Propensity model did not converge.")
+
+study_b$ps <- predict(ps_fit, type = "response")
+treat <- as.integer(study_b$exposure_group == STUDY_B_GROUP_LEVELS[2])
+
+stopifnot(all(is.finite(study_b$ps)), all(study_b$ps > 0), all(study_b$ps < 1))
+
+data.frame(
+  quantity = c("N", "Treated", "Control", "PS minimum", "PS maximum"),
+  value = c(format(nrow(study_b), big.mark = ","),
+            sum(treat == 1), sum(treat == 0),
+            round(min(study_b$ps), 4), round(max(study_b$ps), 4))
+) |> kable()
+```
+
+Only baseline covariates enter the propensity model. Nothing measured after the index
+date belongs here — conditioning on a post-baseline variable would adjust away part of
+the treatment's effect, and no amount of balance on such a variable is worth having.
+
+`r STUDY_B_GROUP_LEVELS[1]` and `r STUDY_B_GROUP_LEVELS[2]` are the two treatment arms.
+`r STUDY_B_GROUP_LEVELS[1]` is the reference, so every hazard ratio in Study B reads as
+"`r STUDY_B_GROUP_LEVELS[2]` relative to `r STUDY_B_GROUP_LEVELS[1]`", and the propensity
+score is the modelled probability of receiving **`r STUDY_B_GROUP_LEVELS[2]`**.
+
+### Reading the plot below
+
+The propensity score collapses all `r length(PS_FORMULA_VARS)` baseline covariates into a
+single number: given everything known about a subject at index, how likely were they to
+receive `r STUDY_B_GROUP_LEVELS[2]`? A score of 0.8 describes someone who looks like a
+typical `r STUDY_B_GROUP_LEVELS[2]` recipient; 0.15 describes someone who looks like a
+typical `r STUDY_B_GROUP_LEVELS[1]` recipient. It says nothing about their outcome.
+
+The plot draws one curve per arm, showing how that arm's subjects are distributed across
+the score. The vertical axis is density rather than headcount — each curve integrates to
+one on its own — so the shapes stay comparable even though the arms are different sizes.
+
+There are two separate things to read off it, and they pull in opposite directions:
+
+- **Horizontal separation between the curves is the confounding.** Under randomisation the
+  two curves would lie on top of each other, because nothing measured at baseline would
+  predict the assigned arm. Any daylight between them measures how far this study is from
+  that ideal.
+- **Vertical overlap is what licenses the adjustment.** Pick any point on the horizontal
+  axis: if both colours are present there, subjects with that profile exist in both arms
+  and can be compared. Where one colour drops to zero, the estimate for that region comes
+  from extrapolating the model rather than from anybody real.
+
+```{r}
+#| label: ps-overlap
+#| fig-height: 4
+ggplot(study_b, aes(x = ps, fill = exposure_group)) +
+  geom_density(alpha = 0.5, colour = NA) +
+  scale_fill_manual(values = c("#2c3e50", "#c0392b")) +
+  labs(x = sprintf("Propensity score: modelled P(%s | baseline covariates)",
+                   STUDY_B_GROUP_LEVELS[2]),
+       y = "Density", fill = "Arm actually received",
+       title = "The arms differ at baseline, but their propensity scores overlap",
+       subtitle = paste("Separation between the curves is the confounding.",
+                        "The shared region is what makes adjustment possible.",
+                        sep = "\n")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom",
+        plot.subtitle = element_text(lineheight = 1.2))
+```
+
+```{r}
+#| label: ps-by-arm
+ps_summary <- do.call(rbind, lapply(levels(study_b$exposure_group), function(lv) {
+  p <- study_b$ps[study_b$exposure_group == lv]
+  data.frame(
+    arm = lv,
+    n = length(p),
+    median_ps = round(median(p), 3),
+    pct5 = round(quantile(p, 0.05), 3),
+    pct95 = round(quantile(p, 0.95), 3)
+  )
+}))
+kable(ps_summary, row.names = FALSE,
+      col.names = c("Arm", "N", "Median PS", "5th pct", "95th pct"))
+```
+
+Two separate things are visible here, and they are easy to conflate.
+
+**The curves are shifted apart, and that is the confounding.** Subjects who actually
+received `r STUDY_B_GROUP_LEVELS[2]` have a higher modelled probability of receiving it —
+median `r ps_summary$median_ps[2]` against `r ps_summary$median_ps[1]`. The propensity
+model is not inventing that separation; it is measuring a real baseline difference between
+the arms:
+
+```{r}
+#| label: why-they-differ
+a_idx <- study_b$exposure_group == STUDY_B_GROUP_LEVELS[1]
+c_idx <- study_b$exposure_group == STUDY_B_GROUP_LEVELS[2]
+as_num <- function(x) as.numeric(as.character(x))
+
+data.frame(
+  covariate = c("Mean age", "clinical_binary_1 prevalence",
+                "clinical_binary_2 prevalence"),
+  arm_a = round(c(mean(study_b$demo_age[a_idx]),
+                  mean(as_num(study_b$clinical_binary_1)[a_idx]),
+                  mean(as_num(study_b$clinical_binary_2)[a_idx])), 3),
+  arm_c = round(c(mean(study_b$demo_age[c_idx]),
+                  mean(as_num(study_b$clinical_binary_1)[c_idx]),
+                  mean(as_num(study_b$clinical_binary_2)[c_idx])), 3)
+) |> kable(row.names = FALSE,
+           col.names = c("Covariate", STUDY_B_GROUP_LEVELS[1], STUDY_B_GROUP_LEVELS[2]))
+```
+
+Older and sicker subjects were channelled toward `r STUDY_B_GROUP_LEVELS[2]`. Comparing
+raw outcomes between the arms would credit the drug with a difference that baseline risk
+created.
+
+**The curves also overlap heavily, and that is what makes adjustment possible.** Across
+roughly `r ps_summary$pct5[2]` to `r ps_summary$pct95[1]` both arms are well represented,
+and `r format(sum(study_b$ps > 0.05 & study_b$ps < 0.95), big.mark = ",")` of
+`r format(nrow(study_b), big.mark = ",")` subjects sit between 0.05 and 0.95.
+
+This matters because every weighting scheme is answering a counterfactual: what would this
+`r STUDY_B_GROUP_LEVELS[2]` subject's outcome have been under
+`r STUDY_B_GROUP_LEVELS[1]`? A subject with a propensity score near 1 has almost no
+counterpart in the other arm, so that question gets answered by extrapolation rather than
+by evidence.
+
+The picture to worry about is the opposite of this one: two curves that barely touch, or a
+region where one arm's density is zero while the other's is high. No weighting scheme
+repairs that — the response is to restrict the analysis to the region of common support.
+Here the overlap is sound, so the design holds.
+
+## Three sets of weights
+
+```{r}
+#| label: weights
+w <- create_weights(study_b$ps, treat)
+study_b <- cbind(study_b, w)
+
+data.frame(
+  method = c("IPTW", "Stabilized IPTW", "Overlap"),
+  formula = c("1/ps for treated, 1/(1-ps) for control",
+              "P(treated)/ps, P(control)/(1-ps)",
+              "1-ps for treated, ps for control"),
+  target_population = c("Whole population", "Whole population",
+                        "Subjects with genuine clinical equipoise")
+) |> kable()
+```
+
+The three differ in more than arithmetic. Inverse-probability weights target the whole
+population and give the most weight to subjects who look least like their own arm — which
+is exactly where the data is thinnest. A subject whose propensity score is far from their
+observed treatment receives a very large weight and can move the estimate on their own:
+the largest inverse-probability weight in this cohort is
+`r round(max(w$iptw), 1)`, meaning one subject counts as much as
+`r round(max(w$iptw))` others.
+
+Overlap weights invert that. A subject with propensity score 0.5 — equally likely to have
+received either treatment — gets the most weight, and subjects at the extremes get almost
+none. Weights are bounded in (0, 1) by construction, so no individual can dominate.
+
+The cost is that the estimand changes. Overlap weighting estimates the effect in the
+population of subjects who could plausibly have received either treatment, not in the
+whole population. That is a narrower question, and for a treatment comparison it is often
+the more clinically meaningful one — but it has to be stated rather than assumed.
+
+## What each weighting scheme costs
+
+```{r}
+#| label: diagnostics
+diag <- weight_diagnostics(w, study_b$ps, treat)
+kable(diag, row.names = FALSE)
+save_table(diag, "weight_diagnostics")
+```
+
+```{r}
+#| label: ess
+ess_tbl <- data.frame(
+  method = c("Unweighted", "IPTW", "Stabilized IPTW", "Overlap"),
+  ess_total = round(c(nrow(study_b), diag$ess_total), 1)
+)
+ess_tbl$pct_of_cohort <- round(100 * ess_tbl$ess_total / nrow(study_b), 1)
+kable(ess_tbl, row.names = FALSE)
+```
+
+The effective sample size is the honest accounting. Weighting does not create
+information: a cohort of `r format(nrow(study_b), big.mark = ",")` subjects weighted so
+that a few dominate carries the precision of a much smaller study. The Kish effective
+sample size, $(\sum w)^2 / \sum w^2$, says how much smaller.
+
+```{r}
+#| label: weight-dist
+#| fig-height: 4
+long <- rbind(
+  data.frame(method = "IPTW", weight = w$iptw),
+  data.frame(method = "Stabilized IPTW", weight = w$sw_iptw),
+  data.frame(method = "Overlap", weight = w$overlap_w)
+)
+
+ggplot(long, aes(x = weight)) +
+  geom_histogram(bins = 60, fill = "#2c3e50") +
+  facet_wrap(~method, scales = "free") +
+  labs(x = "Weight", y = "Count",
+       title = "Weight distributions",
+       subtitle = "Note the differing x-axis scales") +
+  theme_minimal(base_size = 11)
+```
+
+Note that the extreme-weight thresholds in the diagnostics table differ by method. A
+single cutoff across all three would be meaningless: stabilized weights centre on 1,
+untruncated inverse-probability weights have no upper bound, and overlap weights cannot
+exceed 1 by construction. For overlap weighting the diagnostic reported instead is the
+share of subjects whose propensity score falls outside the central range, since that is
+where the design is actually under strain.
+
+## Balance
+
+```{r}
+#| label: unweighted-table1
+tab_unw <- CreateTableOne(vars = BASELINE_PREDICTORS, strata = GROUP_VAR,
+                          data = study_b, test = FALSE, addOverall = TRUE)
+print(tab_unw, smd = TRUE, showAllLevels = TRUE, printToggle = FALSE) |>
+  as.data.frame() |> kable()
+```
+
+```{r}
+#| label: weighted-table1
+design <- svydesign(ids = ~1, data = study_b, weights = ~overlap_w)
+tab_ow <- svyCreateTableOne(vars = BASELINE_PREDICTORS, strata = GROUP_VAR,
+                            data = design, test = FALSE, addOverall = TRUE)
+print(tab_ow, smd = TRUE, showAllLevels = TRUE, printToggle = FALSE) |>
+  as.data.frame() |> kable()
+```
+
+`test = FALSE` is deliberate, for the same reason as in Study A: at this sample size a
+hypothesis test detects differences far too small to matter, so the SMD column is the one
+to read.
+
+### All three methods side by side
+
+```{r}
+#| label: bal-tab
+bal <- bal.tab(
+  ps_formula, data = study_b, method = "weighting",
+  weights = list(IPTW = w$iptw, `Stabilized IPTW` = w$sw_iptw,
+                 Overlap = w$overlap_w),
+  s.d.denom = "pooled", binary = "std", continuous = "std",
+  thresholds = c(m = SMD_THRESHOLD), un = TRUE
+)
+
+# cobalt derives its column names from the names of the weights list and
+# sanitises them, so the columns are located by pattern rather than assumed.
+diff_cols <- grep("^Diff\\.", names(bal$Balance), value = TRUE)
+
+bal_summary <- data.frame(
+  method = sub("^Diff\\.", "", diff_cols),
+  max_abs_smd = round(vapply(diff_cols, function(cl)
+    max(abs(bal$Balance[[cl]]), na.rm = TRUE), numeric(1)), 6),
+  row.names = NULL
+)
+bal_summary$method[bal_summary$method == "Un"] <- "Unweighted"
+bal_summary$all_balanced <- bal_summary$max_abs_smd <= SMD_THRESHOLD
+kable(bal_summary, row.names = FALSE)
+save_table(bal_summary, "weighting_balance_summary")
+```
+
+```{r}
+#| label: assert-balance
+# Overlap weighting balances the covariates in its propensity model exactly, up
+# to floating point. This is a mathematical property of the weights, not a
+# result that needed tuning -- so it is asserted tightly.
+stopifnot(bal_summary$max_abs_smd[bal_summary$method == "Overlap"] < 1e-6)
+```
+
+Overlap weighting achieves **exact** balance on every covariate in the propensity model —
+not "under 0.10", but zero to numerical precision. This is a known algebraic property of
+the weights rather than a lucky outcome: weighting the treated by $1-e$ and the controls
+by $e$ makes the weighted covariate means identical by construction whenever the
+propensity score comes from a logistic model containing those covariates.
+
+That property is what makes the caliper search of Study A unnecessary here. There is no
+tuning parameter, and no attempt log, because there is nothing to tune.
+
+```{r}
+#| label: love-plot
+#| fig-height: 6
+love.plot(
+  bal, stats = "mean.diffs", abs = TRUE,
+  thresholds = c(m = SMD_THRESHOLD), var.order = "unadjusted",
+  line = TRUE, drop.distance = TRUE,
+  title = "Covariate balance under three weighting schemes"
+)
+```
+
+## The comparison that decided the design
+
+```{r}
+#| label: final-comparison
+# Rebuild the Study A match if this notebook is rendered on its own, so it does
+# not depend on another notebook having run first.
+study_a_clean <- clean_study_a(load_study("a"))
+matched_path  <- file.path(dirname(PATHS$study_a), "study_a_matched.rds")
+
+matched_a <- if (file.exists(matched_path)) {
+  readRDS(matched_path)
+} else {
+  s <- search_caliper(study_a_clean, GROUP_VAR, PS_FORMULA_VARS, BASELINE_PREDICTORS)
+  list(full = s$selected$matched, caliper_full = s$selected$caliper)
+}
+
+data.frame(
+  approach = c("Study A — 1:1 matching, tuned caliper",
+               "Study B — overlap weighting"),
+  subjects_used = c(
+    sprintf("%s of %s (%.1f%%)",
+            format(nrow(matched_a$full), big.mark = ","),
+            format(nrow(study_a_clean), big.mark = ","),
+            100 * nrow(matched_a$full) / nrow(study_a_clean)),
+    sprintf("%s of %s (100%%)",
+            format(nrow(study_b), big.mark = ","),
+            format(nrow(study_b), big.mark = ","))
+  ),
+  effective_n = c(format(nrow(matched_a$full), big.mark = ","),
+                  format(round(diag$ess_total[diag$method == "overlap_w"]),
+                         big.mark = ",")),
+  balance_achieved = c("All |SMD| <= 0.10, after searching the caliper",
+                       "Exact, by construction"),
+  tuning_required = c("Yes — caliper", "None")
+) |> kable()
+```
+
+Weighting keeps every subject, but the effective sample size is what it actually spends,
+and that number is lower than the headcount. Matching keeps fewer subjects but each one
+counts once. The two are closer in real precision than the raw counts suggest — the
+argument for weighting is not that it is free, it is that balance is exact and there is no
+tuning parameter to get wrong.
+
+## Saving for the outcome models
+
+```{r}
+#| label: save
+saveRDS(study_b, file.path(dirname(PATHS$study_b), "study_b_weighted.rds"))
+```
+
+## What to carry forward
+
+- Overlap weights balance exactly and are bounded, so no subject can dominate. They also
+  change the estimand to the population with genuine equipoise, which has to be stated.
+- Report the effective sample size. It is what the weighted analysis actually costs, and
+  a headcount hides it.
+- Extreme-weight thresholds are method-specific. One cutoff across methods on different
+  scales is not a diagnostic.
+- Balance is judged on SMD, not on p-values, in the weighted table exactly as in the
+  unweighted one.
+
+Next: [the competing-risks models](05-competing-risks.qmd) that use these weights.
