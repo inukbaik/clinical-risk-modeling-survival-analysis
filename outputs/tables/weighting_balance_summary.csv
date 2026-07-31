@@ -1,0 +1,5 @@
+"method","max_abs_smd","all_balanced"
+"Unweighted",0.689805,FALSE
+"IPTW",0.005281,TRUE
+"Stabilized IPTW",0.005281,TRUE
+"Overlap",0,TRUE

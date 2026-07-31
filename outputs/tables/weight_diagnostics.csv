@@ -1,0 +1,4 @@
+"method","min","median","mean","max","criterion","n_flagged","ess_treated","ess_control","ess_total"
+"iptw",1.0165,1.5222,1.9999,22.1318,"weight > 10",61,5415.6,9825.4,13963.9
+"sw_iptw",0.4212,0.8279,0.9999,8.6093,"weight > 3",310,5415.6,9825.4,15165.7
+"overlap_w",0.0162,0.3431,0.3854,0.9548,"PS outside [0.1, 0.9]",765,6560,9344.7,15417.2

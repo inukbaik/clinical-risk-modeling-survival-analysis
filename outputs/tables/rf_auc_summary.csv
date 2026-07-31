@@ -1,0 +1,3 @@
+"model","auc"
+"A — unmatched, no treatment",0.632747461668073
+"B — matched, with treatment",0.649349756368381

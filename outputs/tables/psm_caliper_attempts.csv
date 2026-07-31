@@ -1,0 +1,9 @@
+"caliper","n_matched","pct_retained","max_abs_smd","worst_covariate","n_imbalanced","balanced"
+0.3,19010,95.4,0.1652,"demo_age",8,FALSE
+0.28,18894,94.8,0.1592,"clinical_binary_1_1",8,FALSE
+0.26,18778,94.3,0.1417,"demo_age",7,FALSE
+0.24,18552,93.1,0.1293,"clinical_binary_1_1",3,FALSE
+0.22,18454,92.6,0.1367,"clinical_binary_1_1",2,FALSE
+0.2,18276,91.7,0.1089,"clinical_binary_1_0",2,FALSE
+0.18,18172,91.2,0.1093,"clinical_binary_1_1",2,FALSE
+0.16,18082,90.8,0.0858,"clinical_binary_1_0",0,TRUE
