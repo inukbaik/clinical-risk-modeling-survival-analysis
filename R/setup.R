@@ -10,6 +10,7 @@ source("R/simulate.R")
 source("R/clean.R")
 source("R/balance.R")
 source("R/inference.R")
+source("R/contracts.R")
 
 for (p in c(PATHS$output_tables, dirname(PATHS$study_a))) {
   dir.create(p, recursive = TRUE, showWarnings = FALSE)
