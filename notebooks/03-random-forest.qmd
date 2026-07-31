@@ -1,0 +1,339 @@
+---
+title: "Random forest importance"
+subtitle: "Problem 2 — two models, two different questions"
+---
+
+```{r}
+#| label: setup
+source("R/setup.R")
+library(caret)
+library(ranger)
+library(recipes)
+library(themis)
+library(pROC)
+library(ggplot2)
+library(knitr)
+
+study_a <- clean_study_a(load_study("a"))
+matched <- readRDS(file.path(dirname(PATHS$study_a), "study_a_matched.rds"))
+md_full <- matched$full
+```
+
+## The problem
+
+Two random forests were fitted during the original work and they disagreed about which
+variables mattered. One was fitted on the unmatched cohort with the treatment variable
+excluded; the other on the propensity-matched cohort with treatment included. When the
+rankings came out different, the natural question was which one was right.
+
+Neither. They answer different questions, and the disagreement is the expected result.
+
+| | Model A | Model B |
+|---|---|---|
+| Data | Unmatched, full cohort | Propensity-matched cohort |
+| Treatment variable | Excluded | Included |
+| Question | Which baseline characteristics predict the outcome? | Does treatment carry predictive information once the arms are balanced? |
+
+Model A is a baseline risk question — it describes who is at risk, in the population as
+it actually is. Model B is a prediction question asked inside a balanced population,
+where treatment can be compared without the covariate distributions differing between
+arms.
+
+Neither estimates a treatment effect. That point is the reason this notebook exists.
+
+## Predictor sets
+
+Leakage control here is a whitelist. The predictors are named explicitly and everything
+else is left out by construction, rather than assembling all columns and subtracting a
+list of forbidden ones. A blacklist has to anticipate every bad column; a whitelist only
+has to name the good ones, and it fails safe when a new column appears.
+
+```{r}
+#| label: predictors
+predictors_a <- BASELINE_PREDICTORS               # no treatment
+predictors_b <- c(GROUP_VAR, BASELINE_PREDICTORS) # treatment included
+
+data.frame(
+  model = c("A — unmatched, no treatment", "B — matched, with treatment"),
+  n_predictors = c(length(predictors_a), length(predictors_b)),
+  predictors = c(paste(predictors_a, collapse = ", "),
+                 paste(predictors_b, collapse = ", "))
+) |> kable()
+```
+
+What is deliberately absent from both: the follow-up times, the other outcome, the
+post-baseline indicator, the record identifier, and the `MatchIt` artifacts
+(`distance`, `weights`, `subclass`) that appear in a matched data frame and would let the
+model reconstruct the matching.
+
+```{r}
+#| label: assert-leakage
+forbidden <- c(ID_VAR, "outcome_1", "outcome_2",
+               "followup_time_1", "followup_time_2",
+               "post_baseline_indicator", MATCHIT_ARTIFACT_VARS)
+
+stopifnot(
+  length(intersect(predictors_a, forbidden)) == 0,
+  length(intersect(predictors_b, forbidden)) == 0,
+  # The two sets differ by exactly the treatment variable.
+  identical(setdiff(predictors_b, predictors_a), GROUP_VAR),
+  length(setdiff(predictors_a, predictors_b)) == 0
+)
+```
+
+`followup_time_*` deserves a specific mention. It is the most tempting column to leave in
+— it is numeric, it is in the data, and it is enormously predictive. It is also
+post-baseline: someone with a short follow-up time either had the event or left the study,
+so including it lets the model read the answer off the input. A classification forest with
+follow-up time among the predictors will report an excellent AUC and mean nothing.
+
+## Fitting
+
+```{r}
+#| label: rf-fit
+rf_model <- function(data, predictors, outcome_var, label, seed = PROJECT_SEED) {
+  d <- data[, c(predictors, outcome_var)]
+  d$.outcome <- factor(ifelse(d[[outcome_var]] == 1, "Event", "NoEvent"),
+                       levels = c("NoEvent", "Event"))
+  d[[outcome_var]] <- NULL
+
+  set.seed(seed)
+  idx   <- createDataPartition(d$.outcome, p = 0.75, list = FALSE)
+  train <- d[idx, ]
+  test  <- d[-idx, ]
+
+  # The recipe is passed to caret::train rather than pre-baked. SMOTE creates
+  # synthetic minority rows by interpolating between neighbours, so baking it
+  # once before cross-validation puts rows derived from fold k into the
+  # training data of every other fold. The tuning metric is then optimistic and
+  # the selected hyperparameters are chosen against a leak.
+  rec <- recipe(.outcome ~ ., data = train) |>
+    step_dummy(all_nominal_predictors()) |>
+    step_smote(.outcome, over_ratio = 0.5)
+
+  ctrl <- trainControl(
+    method = "cv", number = 5, classProbs = TRUE,
+    summaryFunction = twoClassSummary, savePredictions = "final",
+    allowParallel = FALSE
+  )
+  grid <- expand.grid(mtry = c(2, 5), splitrule = "gini",
+                      min.node.size = c(10, 30))
+
+  # Tuning runs without importance. Permutation importance is expensive and is
+  # not used to select hyperparameters, so computing it on all 20 resample fits
+  # would be pure waste -- it is computed once, on the final model.
+  set.seed(seed)
+  fit <- train(rec, data = train, method = "ranger", metric = "ROC",
+               num.trees = RF_NUM_TREES, importance = "none",
+               tuneGrid = grid, trControl = ctrl)
+
+  # Refit the selected configuration once, with permutation importance. SMOTE
+  # is applied to the whole training set here, which is correct: the leak this
+  # avoids is synthetic rows crossing *resample* boundaries during tuning, and
+  # tuning is already finished. step_smote carries skip = TRUE, so baking the
+  # test set does not oversample it.
+  prepped     <- prep(rec, training = train)
+  train_baked <- bake(prepped, new_data = NULL)
+  test_baked  <- bake(prepped, new_data = test)
+
+  set.seed(seed)
+  final_fit <- ranger(
+    .outcome ~ ., data = train_baked, num.trees = RF_NUM_TREES,
+    mtry = fit$bestTune$mtry, min.node.size = fit$bestTune$min.node.size,
+    splitrule = "gini", importance = "permutation", probability = TRUE
+  )
+
+  prob <- predict(final_fit, data = test_baked)$predictions[, "Event"]
+  roc_obj <- roc(response = test_baked$.outcome, predictor = prob,
+                 levels = c("NoEvent", "Event"), direction = "<", quiet = TRUE)
+
+  imp <- data.frame(variable = names(final_fit$variable.importance),
+                    importance = as.numeric(final_fit$variable.importance),
+                    row.names = NULL)
+  imp <- imp[order(-imp$importance), ]
+  imp$rank <- seq_len(nrow(imp))
+
+  list(label = label, fit = final_fit, auc = as.numeric(auc(roc_obj)),
+       importance = imp, n_train = nrow(train), n_test = nrow(test),
+       best = fit$bestTune)
+}
+```
+
+```{r}
+#| label: run-models
+model_a <- rf_model(study_a, predictors_a, "outcome_1",
+                    "A — unmatched, no treatment")
+model_b <- rf_model(md_full, predictors_b, "outcome_1",
+                    "B — matched, with treatment")
+```
+
+```{r}
+#| label: model-summary
+data.frame(
+  model = c(model_a$label, model_b$label),
+  n_train = c(model_a$n_train, model_b$n_train),
+  n_test = c(model_a$n_test, model_b$n_test),
+  mtry = c(model_a$best$mtry, model_b$best$mtry),
+  min_node = c(model_a$best$min.node.size, model_b$best$min.node.size),
+  test_auc = round(c(model_a$auc, model_b$auc), 4)
+) |> kable()
+
+save_table(
+  data.frame(model = c(model_a$label, model_b$label),
+             auc = c(model_a$auc, model_b$auc)),
+  "rf_auc_summary"
+)
+```
+
+## The two rankings
+
+```{r}
+#| label: importance-tables
+imp_a <- model_a$importance
+imp_b <- model_b$importance
+names(imp_a)[2:3] <- c("importance_A", "rank_A")
+names(imp_b)[2:3] <- c("importance_B", "rank_B")
+
+comparison <- merge(imp_a, imp_b, by = "variable", all = TRUE)
+comparison <- comparison[order(comparison$rank_A), ]
+kable(comparison, row.names = FALSE, digits = 2)
+
+save_table(comparison, "rf_importance_comparison")
+```
+
+```{r}
+#| label: importance-plot
+#| fig-height: 6
+plot_df <- rbind(
+  transform(model_a$importance[1:10, ], model = "A — unmatched, no treatment"),
+  transform(model_b$importance[1:10, ], model = "B — matched, with treatment")
+)
+
+ggplot(plot_df, aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "#2c3e50") +
+  coord_flip() +
+  facet_wrap(~model, scales = "free_y") +
+  labs(x = NULL, y = "Permutation importance",
+       title = "Variable importance depends on the question being asked") +
+  theme_minimal(base_size = 11)
+```
+
+## Why they differ
+
+Three reasons, all legitimate:
+
+**The analytic samples are different.** Matching discards subjects outside the caliper
+and reshapes the covariate distributions of those that remain. A forest splits on
+whatever separates the data in front of it, so a different sample produces different
+splits — before any question of which variables are "really" important.
+
+**The predictor sets are different.** Once treatment is available, the model no longer
+has to lean on variables that correlate with it. Importance is not a fixed property of a
+variable; it is a property of a variable *in the presence of the others*. Adding one
+predictor can demote several.
+
+**Treatment acts as a proxy.** In observational data the treatment variable carries
+information about prescribing patterns, clinical profile, and unmeasured severity — not
+just the pharmacological effect. A model that finds treatment predictive has found that
+treated and untreated subjects differ, which is what confounding is.
+
+## What a high importance rank does not mean
+
+Here the claim can be checked rather than argued, because the true effects are known.
+
+```{r}
+#| label: truth-vs-importance
+truth <- data.frame(
+  variable = c(GROUP_VAR, "demo_age", "demo_sex", "clinical_binary_1",
+               "clinical_binary_2", "clinical_binary_4", "clinical_binary_6",
+               CLINICAL_CONTINUOUS_VAR, "demo_race"),
+  true_log_hr = c(
+    TRUE_A_OUTCOME_1[["treat"]],
+    TRUE_A_OUTCOME_1[["demo_age_per_decade"]],
+    TRUE_A_OUTCOME_1[["demo_sex"]],
+    TRUE_A_OUTCOME_1[["clinical_binary_1"]],
+    TRUE_A_OUTCOME_1[["clinical_binary_2"]],
+    TRUE_A_OUTCOME_1[["clinical_binary_4"]],
+    TRUE_A_OUTCOME_1[["clinical_binary_6"]],
+    TRUE_A_OUTCOME_1[["clinical_cont_per10"]],
+    0
+  )
+)
+
+imp_b_base <- model_b$importance
+imp_b_base$base <- sub("_(Group_B|Missing|X1|1)$", "", imp_b_base$variable)
+agg <- aggregate(importance ~ base, data = imp_b_base, FUN = max)
+names(agg) <- c("variable", "max_importance")
+
+check <- merge(truth, agg, by = "variable", all.x = TRUE)
+check$true_effect_size <- round(abs(check$true_log_hr), 3)
+check <- check[order(-check$max_importance), ]
+kable(check[, c("variable", "max_importance", "true_log_hr", "true_effect_size")],
+      row.names = FALSE, digits = 3)
+```
+
+```{r}
+#| label: headline-ranks
+race_rank <- imp_a$rank_A[grepl("^demo_race_Group_B", imp_a$variable)][1]
+age_rank  <- imp_a$rank_A[imp_a$variable == "demo_age"][1]
+```
+
+Two results stand out, and both are checkable only because the truth is known.
+
+**A variable with no effect at all ranks third.** `demo_race` appears in no outcome model
+in the data-generating process — its true effect is exactly zero — yet
+`demo_race_Group_B` comes `r race_rank`th of `r nrow(imp_a)` in the unmatched model, above
+most of the comorbidities that genuinely drive the outcome. Permutation importance
+measures how much a variable contributes to *predictions*, and a high-variance binary with
+no causal role can still support locally useful splits. Non-zero importance is not
+evidence of an effect, and a respectable rank is not either.
+
+**The variable with the largest true effect ranks `r age_rank`th.** `demo_age` has the
+biggest coefficient in the outcome model
+(`r round(TRUE_A_OUTCOME_1[["demo_age_per_decade"]], 2)` per decade), and it lands near the
+bottom. The reason is redundancy: age drives the comorbidities in this data, so by the
+time the forest has split on `clinical_binary_1` and `clinical_binary_2` it already knows
+most of what age would have told it. Permuting age then costs little accuracy, because the
+information survives elsewhere. Importance is diluted across correlated predictors, and a
+low rank can mean "this variable is redundant" rather than "this variable does not matter".
+
+Between them, these two rows are the whole argument. The ranking does not recover the
+ordering of true effect sizes, in either direction: a null variable placed high and the
+strongest variable placed low.
+
+```{r}
+#| label: rank-vs-truth
+#| fig-height: 4
+ggplot(check[!is.na(check$max_importance), ],
+       aes(x = true_effect_size, y = max_importance)) +
+  geom_point(size = 3, colour = "#2c3e50") +
+  geom_text(aes(label = variable), hjust = -0.1, size = 3) +
+  expand_limits(x = max(check$true_effect_size, na.rm = TRUE) * 1.6) +
+  labs(x = "True effect size (|log hazard ratio|)",
+       y = "Permutation importance",
+       title = "Importance is not effect size",
+       subtitle = "Model B — matched cohort, treatment included") +
+  theme_minimal(base_size = 12)
+```
+
+Feature importance carries no sign, so it cannot say whether a variable raises or lowers
+risk. It carries no confidence interval, so it cannot say whether a difference in rank is
+distinguishable from noise. And it is not invariant to the other variables in the model.
+None of that makes it useless — it is a reasonable description of what a model relies on —
+but it is not a treatment effect and it does not become one by ranking highly.
+
+The treatment effect for these data is in
+[the Cox models](02-cox-models.qmd): a hazard ratio, with a direction, an interval, and a
+population it refers to.
+
+## What to carry forward
+
+- Decide what question the forest is answering before choosing the data and the predictor
+  set. "Unmatched without treatment" and "matched with treatment" are two designs, not a
+  right and a wrong one.
+- Use a whitelist for predictors. It fails safe; a blacklist fails silently.
+- Keep post-baseline variables out, follow-up time most of all.
+- Resample inside the cross-validation loop, not before it, or the tuning metric is
+  measuring a leak.
+- Report importance as what a model relies on. For a treatment effect, fit a model that
+  estimates one.

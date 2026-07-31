@@ -1,0 +1,319 @@
+---
+title: "Cox models"
+subtitle: "Study A outcome models on the matched cohort"
+---
+
+```{r}
+#| label: setup
+source("R/setup.R")
+library(survival)
+library(survminer)
+library(knitr)
+
+study_a <- clean_study_a(load_study("a"))
+matched <- readRDS(file.path(dirname(PATHS$study_a), "study_a_matched.rds"))
+md_full <- matched$full
+md_65   <- matched$age65
+```
+
+This notebook takes the matched cohort from
+[the previous step](01-balance-and-psm.qmd) and estimates the treatment effect. Because
+the data is simulated, each estimate can be compared against the hazard ratio that
+generated it — which is the check the original analysis had no way to perform.
+
+## The adjustment ladder
+
+Covariates are added in blocks rather than all at once, so that the movement of the
+treatment estimate is visible:
+
+| Model | Adds | Rationale |
+|---|---|---|
+| m1 | Treatment only | Unadjusted contrast within the matched cohort |
+| m2 | Demographics | Age, sex, race |
+| m3 | Comorbidities | The six binary clinical variables |
+| m4 | Lab measure | `clinical_continuous_1`, entered last |
+
+The lab measure comes last on purpose. It is affected by the comorbidities and in turn
+affects the outcome, so it sits on the causal pathway rather than being a pure
+confounder. Adjusting for it removes part of the effect being estimated. Entering it in
+its own step makes that visible rather than burying it in a single fully-adjusted model.
+
+Matching is not a substitute for adjustment. A matched cohort is balanced on average, not
+exactly, and residual imbalance within the caliper still biases the estimate. Fitting the
+ladder on the matched data — matching *and* adjusting — is the standard recommendation.
+
+```{r}
+#| label: ladder-spec
+ladder <- list(
+  m1 = character(0),
+  m2 = DEMOGRAPHIC_VARS,
+  m3 = c(DEMOGRAPHIC_VARS, CLINICAL_BINARY_VARS),
+  m4 = c(DEMOGRAPHIC_VARS, CLINICAL_BINARY_VARS, CLINICAL_CONTINUOUS_VAR)
+)
+ladder_labels <- c(m1 = "Treatment only", m2 = "+ demographics",
+                   m3 = "+ comorbidities", m4 = "+ lab measure")
+```
+
+## Fitting
+
+Matched pairs are not independent observations, so every model carries
+`cluster(subclass)`. Without it the standard errors treat two members of a pair as two
+independent subjects, and the confidence intervals come out too narrow.
+
+```{r}
+#| label: fit-ladder
+fit_ladder <- function(data, spec, time_var, event_var, cohort_label,
+                       outcome_label) {
+  rows <- list()
+  for (nm in names(spec)) {
+    rhs <- c(GROUP_VAR, spec[[nm]], "cluster(subclass)")
+    fml <- reformulate(rhs, response = sprintf("Surv(%s, %s)", time_var, event_var))
+    fit <- coxph(fml, data = data)
+
+    term <- paste0(GROUP_VAR, STUDY_A_GROUP_LEVELS[2])
+    rows[[nm]] <- model_result_row(
+      fit, term = term, label = cohort_label, model = ladder_labels[[nm]],
+      se_source = "robust",
+      extra = list(outcome = outcome_label,
+                   n = fit$n, events = fit$nevent)
+    )
+  }
+  do.call(rbind, rows)
+}
+
+results <- list()
+for (oc in names(STUDY_A_OUTCOMES)) {
+  spec <- STUDY_A_OUTCOMES[[oc]]
+  results[[paste0(oc, "_full")]] <- fit_ladder(
+    md_full, ladder, spec$time_var, spec$event_var, "Full cohort", spec$label
+  )
+  results[[paste0(oc, "_65")]] <- fit_ladder(
+    md_65, ladder, spec$time_var, spec$event_var, "Age >= 65", spec$label
+  )
+}
+cox_results <- do.call(rbind, results)
+rownames(cox_results) <- NULL
+```
+
+## Results
+
+```{r}
+#| label: results-table
+true_hr <- c("Outcome 1" = exp(TRUE_A_OUTCOME_1[["treat"]]),
+             "Outcome 2" = exp(TRUE_A_OUTCOME_2[["treat"]]))
+
+display <- add_display(cox_results)
+display$true_hr <- round(true_hr[display$outcome], 3)
+
+display[, c("outcome", "analysis", "model", "n", "events", "hr_ci", "p", "true_hr")] |>
+  kable(col.names = c("Outcome", "Cohort", "Model", "N", "Events",
+                      "HR (95% CI)", "p", "True HR"),
+        row.names = FALSE)
+
+save_table(cox_results, "cox_results")
+```
+
+## Reading the ladder
+
+```{r}
+#| label: ladder-plot
+#| fig-height: 5
+library(ggplot2)
+
+plot_df <- display[display$analysis == "Full cohort", ]
+plot_df$model <- factor(plot_df$model, levels = ladder_labels)
+
+ggplot(plot_df, aes(x = model, y = estimate, colour = outcome)) +
+  geom_hline(yintercept = 1, colour = "grey60") +
+  geom_pointrange(aes(ymin = ci_lower, ymax = ci_upper),
+                  position = position_dodge(width = 0.35)) +
+  geom_hline(aes(yintercept = true_hr, colour = outcome), linetype = "dashed") +
+  labs(x = NULL, y = "Hazard ratio (95% CI)", colour = "Outcome",
+       title = "Treatment effect across the adjustment ladder, full matched cohort",
+       subtitle = "Dashed lines are the true hazard ratios that generated the data") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+### Did the design recover the truth?
+
+The comparison that matters is not "unadjusted versus adjusted" — it is "unmatched versus
+matched". Inside the matched cohort the confounding has already been dealt with, so `m1`
+and `m3` should broadly agree. Outside it, they should not.
+
+```{r}
+#| label: recovery-check
+final <- display[display$model == "+ comorbidities" &
+                   display$analysis == "Full cohort", ]
+matched_unadj <- display[display$model == "Treatment only" &
+                           display$analysis == "Full cohort", ]
+
+# The starting point: no matching, no adjustment.
+raw <- study_a
+unmatched_hr <- vapply(names(STUDY_A_OUTCOMES), function(oc) {
+  s <- STUDY_A_OUTCOMES[[oc]]
+  d <- raw[raw[[s$time_var]] > 0, ]
+  exp(coef(coxph(reformulate(GROUP_VAR,
+                             response = sprintf("Surv(%s, %s)", s$time_var, s$event_var)),
+                 data = d)))[[1]]
+}, numeric(1))
+
+recovery <- data.frame(
+  outcome = final$outcome,
+  unmatched_unadjusted = round(unmatched_hr, 3),
+  matched_unadjusted = round(matched_unadj$estimate, 3),
+  matched_adjusted = round(final$estimate, 3),
+  true_hr = final$true_hr,
+  matched_adjusted_ci = final$hr_ci
+)
+kable(recovery, row.names = FALSE)
+```
+
+```{r}
+#| label: recovery-distance
+dist_tbl <- data.frame(
+  outcome = final$outcome,
+  d_unmatched = round(abs(log(unmatched_hr) - log(final$true_hr)), 3),
+  d_matched_unadj = round(abs(log(matched_unadj$estimate) - log(final$true_hr)), 3),
+  d_matched_adj = round(abs(log(final$estimate) - log(final$true_hr)), 3)
+)
+kable(dist_tbl, row.names = FALSE,
+      col.names = c("Outcome", "Unmatched, unadjusted",
+                    "Matched, unadjusted", "Matched, adjusted"))
+```
+
+Distance from the truth on the log-hazard scale. For outcome 1 the unmatched contrast is
+off by `r dist_tbl$d_unmatched[1]`; matching alone cuts that to
+`r dist_tbl$d_matched_unadj[1]`. Confounding was hiding the effect entirely, and the
+match is what recovered it.
+
+```{r}
+#| label: assert-recovery
+# The claim the design makes: matching moves the estimate substantially closer
+# to the truth than doing nothing. Coverage of any single 95% interval is
+# deliberately NOT asserted -- see below.
+stopifnot(dist_tbl$d_matched_unadj < dist_tbl$d_unmatched,
+          dist_tbl$d_matched_adj  < dist_tbl$d_unmatched)
+```
+
+Within the matched cohort, adding covariates barely moves outcome 1 (`m1`
+`r recovery$matched_unadjusted[1]` → `m3` `r recovery$matched_adjusted[1]`). That
+stability is itself a result: it is what balance looks like from the outcome side. If
+adjustment had moved the estimate substantially, it would mean the match had left
+confounding behind.
+
+That said, adjustment still belongs in the model. Matching balances on average, not
+exactly, and the residual imbalance inside the caliper is real. The original analysis went
+back and forth on this — an early version fitted only the unadjusted model on matched
+data, arguing the matching had already done the adjusting, and a later revision restored
+the full ladder. The later position is the standard one.
+
+Outcome 2's interval does not cover its true hazard ratio in this realization. That is
+worth stating plainly rather than hiding, because it is the expected behaviour of a
+confidence interval rather than a failure of the analysis: a 95% interval misses one time
+in twenty, and this notebook produces four cohort-by-outcome combinations. Outcome 2 is
+also the harder case — fewer events and a smaller true effect, so the least precise
+estimate here.
+
+The reason this can be diagnosed at all is that the truth is known. In the original
+analysis an estimate landing 2.6 standard errors from its target would have been
+indistinguishable from a coding error, and the only available response would have been to
+re-read the code. Here the question is settled directly.
+
+```{r}
+#| label: precision-note
+data.frame(
+  outcome = final$outcome,
+  events = final$events,
+  se_log_hr = round(final$se_log, 4),
+  sd_from_truth = round(abs(log(final$estimate) - log(final$true_hr)) / final$se_log, 2),
+  covers_truth = final$ci_lower <= final$true_hr & final$ci_upper >= final$true_hr
+) |> kable(row.names = FALSE)
+```
+
+Adding the lab measure in `m4` pulls both estimates toward the null. That is what
+adjusting for a mediator does — it removes the part of the treatment effect that operates
+through that variable. The `m4` estimate is not a better-adjusted version of `m3`; it is
+an estimate of a different quantity, the direct effect not mediated by the lab measure.
+Reporting it as the headline result would understate the total effect.
+
+## Survival curves
+
+```{r}
+#| label: km
+#| fig-height: 6
+km_fit <- survfit(Surv(followup_time_1, outcome_1) ~ exposure_group, data = md_full)
+
+ggsurvplot(
+  km_fit, data = md_full,
+  risk.table = TRUE, conf.int = TRUE, pval = TRUE,
+  xlab = "Years since index", ylab = "Event-free probability",
+  legend.labs = STUDY_A_GROUP_LEVELS,
+  palette = c("#2c3e50", "#c0392b"),
+  ylim = c(0.6, 1),
+  risk.table.height = 0.28,
+  ggtheme = theme_minimal(base_size = 12)
+)
+```
+
+## Proportional hazards
+
+The Cox model assumes the hazard ratio is constant over follow-up. If it is not, the
+reported hazard ratio is an average over a changing effect, and its value depends on how
+long people were followed.
+
+```{r}
+#| label: ph-check
+ph_rows <- list()
+for (oc in names(STUDY_A_OUTCOMES)) {
+  spec <- STUDY_A_OUTCOMES[[oc]]
+  fml <- reformulate(
+    c(GROUP_VAR, DEMOGRAPHIC_VARS, CLINICAL_BINARY_VARS),
+    response = sprintf("Surv(%s, %s)", spec$time_var, spec$event_var)
+  )
+  z <- cox.zph(coxph(fml, data = md_full))
+  ph_rows[[oc]] <- data.frame(
+    outcome = spec$label,
+    chisq = round(z$table["GLOBAL", "chisq"], 3),
+    df = z$table["GLOBAL", "df"],
+    p_value = z$table["GLOBAL", "p"],
+    conclusion = ph_status_label(z$table["GLOBAL", "p"])
+  )
+}
+ph_tbl <- do.call(rbind, ph_rows)
+ph_tbl$p_value <- fmt_p(ph_tbl$p_value)
+kable(ph_tbl, row.names = FALSE)
+
+save_table(ph_tbl, "cox_ph_check")
+```
+
+The wording matters. A non-significant test is not evidence that the hazards are
+proportional — it is an absence of evidence that they are not, which at this sample size
+is a weaker statement than it sounds. The data here were generated from a Weibull
+proportional hazards model, so proportionality genuinely holds; the test agreeing with
+that is a check on the test, not a discovery.
+
+```{r}
+#| label: schoenfeld
+#| fig-height: 4
+zph <- cox.zph(coxph(
+  Surv(followup_time_1, outcome_1) ~ exposure_group + demo_age + demo_sex,
+  data = md_full
+))
+plot(zph[1], main = "Scaled Schoenfeld residuals — treatment, outcome 1")
+abline(h = 0, lty = 2, col = "grey50")
+```
+
+## What to carry forward
+
+- Match *and* adjust. Matching balances on average, not exactly, and the residual
+  imbalance inside the caliper is still confounding.
+- Matched pairs are not independent. `cluster(subclass)` is what keeps the standard
+  errors honest.
+- A variable on the causal pathway belongs in its own step, and the model that includes
+  it answers a different question. Which one is the headline is a decision to state, not
+  a default to inherit.
+- "No evidence against proportional hazards" is the most a PH test can support.
+
+Next: [random forest importance](03-random-forest.qmd), and why the matched and unmatched
+models are not interchangeable.
