@@ -27,8 +27,14 @@ The notebooks in `notebooks/` are the deliverable. `R/` holds the code they shar
 - Do not create or infer protected health information.
 - Do not silently change schema names.
 - Do not modify files outside the requested task scope.
-- Do not commit changes automatically.
+- Do not commit changes automatically. Make the requested changes, run the relevant
+  verification, and leave the worktree uncommitted for manual review. Commit only when
+  explicitly instructed to, after the changes have been reviewed.
 - Prefer simple, readable R code over unnecessary abstraction.
+- Avoid redundant comments and prose. Do not restate the code in a comment, explain
+  obvious logic at length, repeat methodological discussion, or add narrative that was
+  not requested. Document a non-obvious decision, invariant, limitation, or
+  interpretation — nothing else.
 - Every notebook must render independently.
 - Fail fast and loudly. Do not add skip-and-continue error handling.
 
