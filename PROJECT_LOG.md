@@ -1,5 +1,84 @@
 # PROJECT_LOG.md
 
+## 2026-07-30 — Rebuild as a problem-driven Quarto project
+
+**Task:** Replace the script-based pipeline with six Quarto notebooks organised around
+three problems from the source analysis, and fix the data-generating process so estimates
+can be checked against known truth. Entries below this one describe the previous
+script pipeline and are retained as history; they no longer describe the codebase.
+
+**Motivation:** The previous pipeline produced null results by construction.
+`scripts/01_generate_synthetic_data.R` drew follow-up time first from a marginal
+exponential, then drew the event indicator from a logistic model that used that time as a
+predictor. No hazard ratio existed in the data-generating process, so the Cox step was
+estimating a parameter that was not there — the shipped headline was HR 0.943
+(0.873–1.018), p = 0.133, two of four random forest models had test AUC near 0.50, and
+`demo_race`, whose true effect was exactly zero, ranked second in permutation importance.
+Separately, `R/validation.R` (133 lines) had no reachable failure path at any call site,
+and the schema was declared in three unlinked places.
+
+**Files removed:** `scripts/01`–`06`; `R/validation.R`, `R/data_cleaning.R`,
+`R/descriptive_tables.R`, `R/propensity_matching.R`, `R/cox_modeling.R`,
+`R/random_forest.R`; `docs/wiki/` (stale on two counts, superseded by the rendered site);
+the tracked 9.9 MB `data/synthetic/synthetic_cohort.csv`; all of `outputs/`; the empty
+`reports/`; stale `.RData` / `.RDataTmp`.
+
+**Files created:**
+- `R/config.R` — rewritten as the single schema definition plus true parameter values
+  (`TRUE_A_OUTCOME_1`, `TRUE_A_OUTCOME_2`, `TRUE_B_EVENT`, `TRUE_B_DEATH`, `TRUE_PS_COEFS`,
+  `TRUE_PS_COEFS_B`) and analysis constants
+- `R/simulate.R` — Weibull proportional hazards generator for Study A; competing-risks
+  generator for Study B with a shared gamma frailty, real date columns, and
+  month-precision death dates
+- `R/clean.R` — `clean_study_a()` with an attrition attribute, `age_subgroup()`
+- `R/balance.R` — SMD helpers, `search_caliper()`, `create_weights()`,
+  `effective_sample_size()`, `weight_diagnostics()`
+- `R/inference.R` — `model_result_row()` (variance source as an explicit argument),
+  `ph_interval_test()`, `robust_wald_test()`, `ph_status_label()`
+- `R/setup.R`, `_quarto.yml`, `index.qmd`, `notebooks/00`–`05`
+
+**Validation results:**
+- Full cold render: 6/6 notebooks, ~2 minutes
+- Study A adjusted Cox recovers HR 0.717 against a true 0.75 (outcome 1); the unadjusted
+  unmatched estimate is 0.988, i.e. confounding hides the effect entirely
+- Naive matching without a caliper raised the largest |SMD| from 0.248 to 0.381 while
+  retaining 95.7% of subjects — asserted in the notebook, since the narrative depends on it
+- Caliper search: 8 attempts, 7 failures, selected 0.16 at max |SMD| 0.086, 90.8% retained
+- Overlap weighting balances to |SMD| = 0 exactly; IPTW effective sample size 13,964 of
+  20,000 versus 15,417 for overlap weights, with 61 inverse-probability weights above 10
+- Fine-Gray sHR 0.810 (0.707–0.927) and cause-specific HR 0.815 (0.712–0.933) against a
+  true cause-specific HR of 0.80; all six sensitivity analyses fall in 0.79–0.82
+- Random forest test AUC 0.633 (unmatched) and 0.649 (matched), replacing the previous
+  near-chance values
+
+**Deviations from the plan, and why:**
+- The plan specified a scale-invariance demonstration (refit with weights × 4) to justify
+  the robust variance. Dropped at the user's direction — the robust-versus-model-based
+  choice is now explained in prose in notebook 05 §3, with no demonstration code, and no
+  p-value backtracking narrative appears anywhere.
+- Study A outcome 2's confidence interval does not cover its true hazard ratio in this
+  realization (2.6 SE away, ~1,900 events). Reported and explained in the notebook rather
+  than resolved by reseeding. Per-estimate CI coverage is deliberately not asserted; the
+  assertion checks that matching moves the estimate closer to truth than doing nothing.
+- Exact same-day event/death ties number zero in this cohort, so the tie rule moves no
+  subjects. Reported honestly. The material finding is that month-precision rounding
+  inverts the true event ordering for a small number of subjects under *both* rules, which
+  no tie rule can fix.
+
+**Assumptions and remaining risks:**
+- `TRUE_PS_COEFS[["clinical_continuous_1"]]` was set to −0.003 so that the covariate
+  excluded from the propensity model is imbalanced at loose calipers and balanced at tight
+  ones. A stronger value makes it unbalanceable at any caliper — realistic, but it would
+  mean the design fails rather than needing tuning. Documented at the definition.
+- Study B uses its own, stronger exposure model (`TRUE_PS_COEFS_B`) so that propensity
+  scores spread toward both extremes and the weighting diagnostics have something to find.
+- Random forest tuning uses `importance = "none"` and refits once with permutation
+  importance, cutting notebook 03 from 2m31s to ~55s. `RF_NUM_TREES = 250`; no conclusion
+  depends on the exact value.
+- The estimated competing-death hazard ratio (1.14) differs from its true value (0.98)
+  because treatment reduces the event and therefore lengthens time at risk for death, in a
+  frailty-selected subset. Explained in notebook 05 rather than treated as a defect.
+
 ## 2026-07-02 — Amendment: RF subcohort naming superseded
 
 **Note:** The 2026-06-27 entry below ("Random forest feature importance workflow") describes a `clinical_binary_1 == 1` subcohort producing `rf_importance_subcohort_*` outputs. This is historical and no longer reflects the codebase. The RF subgroup workflow was changed to an age 65+ subcohort via `create_age_subcohort(age_cutoff = 65)` (slug `age65`) in `scripts/06_random_forest.R`, and current outputs are `rf_importance_age65_outcome_1/2.csv` and `rf_importance_age65_outcome_1/2.png`. No `rf_importance_subcohort_*` files exist. Documentation-only correction; no code or output changes.

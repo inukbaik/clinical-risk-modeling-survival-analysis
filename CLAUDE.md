@@ -1,28 +1,25 @@
 # CLAUDE.md
 
-## Before editing: read the wiki first
-
-Before making any change in this repository, read
-`docs/wiki/00-index.md` and `docs/wiki/06-agent-rules.md`. The wiki
-(`docs/wiki/`) is manually maintained project context — it explains the
-pipeline, data workflow, and output inventory — but it is **not**
-authoritative. It can drift from the code. Verify any specific claim
-(column names, function signatures, file paths, script order) against the
-actual files (starting with `R/config.R`) before relying on it.
-
 ## Project purpose
 
-This repository is a public-safe clinical modeling demo using synthetic data.  
-It demonstrates a reproducible workflow for:
+A public-safe demonstration of an observational drug-safety analysis, built entirely on
+synthetic data and organised around three problems rather than around a list of methods.
 
-- synthetic cohort generation
-- data cleaning and validation
-- descriptive cohort comparison
-- propensity score matching
-- Cox proportional hazards modeling
-- random forest feature importance
+The repository covers two studies:
 
-The project should not contain real patient data.
+- **Study A** — propensity score matching, a nested Cox adjustment ladder, and random
+  forest feature importance
+- **Study B** — overlap weighting and competing-risks analysis with a Fine-Gray model
+
+The notebooks in `notebooks/` are the deliverable. `R/` holds the code they share.
+
+## Before editing
+
+- Read `R/config.R` first. It is the single definition of the schema, the true parameter
+  values, and the analysis constants.
+- Inspect the relevant notebook and helper before changing either.
+- Explain the planned change briefly.
+- Do not rewrite unrelated files.
 
 ## Core rules
 
@@ -31,122 +28,100 @@ The project should not contain real patient data.
 - Do not silently change schema names.
 - Do not modify files outside the requested task scope.
 - Do not commit changes automatically.
-- Do not delete existing outputs unless explicitly instructed.
 - Prefer simple, readable R code over unnecessary abstraction.
-- Every script should be runnable independently.
-- Every major step should fail fast if required inputs are missing.
-- Every major step should fail fast if required inputs have unexpected types.
+- Every notebook must render independently.
+- Fail fast and loudly. Do not add skip-and-continue error handling.
+
+## The truth is known — use it
+
+Because the data is generated, the true parameter values are available in `R/config.R`
+(`TRUE_A_OUTCOME_1`, `TRUE_B_EVENT`, and so on). Every notebook checks its estimates
+against them using `stopifnot()`.
+
+These assertions are the point, not decoration. When adding an analysis, add the check
+that would fail if it were wrong. When an assertion fails, diagnose it — do not loosen the
+tolerance or change the seed to make it pass. Tuning code to produce a desired number is
+the one thing this repository exists to argue against.
+
+## Schema
+
+`R/config.R` is authoritative. Verify against it before relying on anything below.
+
+Shared across both studies:
+
+- `record_id` — identifier
+- `exposure_group` — exposure; `STUDY_A_GROUP_LEVELS` / `STUDY_B_GROUP_LEVELS`, reference
+  level first
+- `demo_age`, `demo_sex`, `demo_race` — demographics; `demo_race` carries a literal
+  `"null"` code before cleaning
+- `clinical_binary_1` … `clinical_binary_6` — baseline comorbidities
+- `clinical_continuous_1` — baseline lab measure
+
+Study A adds `outcome_1`, `outcome_2`, `followup_time_1`, `followup_time_2`, and
+`post_baseline_indicator`.
+
+Study B adds `baseline_date`, `last_fu_date`, `event_date`, `death_month_date`, `death`,
+and the derived `fu_years`, `cr_status`, `cs_event`.
 
 ## Data leakage rules
 
-The following variables must not be used as baseline predictors in random forest feature importance:
+Predictor sets are built as **whitelists** from `BASELINE_PREDICTORS`. Do not replace this
+with a blacklist of forbidden columns: a whitelist fails safe when a new column appears,
+a blacklist fails silently.
+
+Never admissible as a baseline predictor:
 
 - follow-up time variables
-- death indicators
-- post-baseline indicators
-- outcome variables
-- variables created after index date
+- outcome and event indicators
+- `post_baseline_indicator` or anything else measured after index
+- `record_id`
+- the `MatchIt` artifacts `distance`, `weights`, `subclass` (`MATCHIT_ARTIFACT_VARS`)
 
-Cox models may use follow-up time only as the survival time variable.
+Cox and Fine-Gray models may use follow-up time only as the survival time.
 
-## Schema rules
+## Statistical rules
 
-Use stable synthetic variable names, as defined in `R/config.R`. That file
-is authoritative for schema — verify against it before relying on the list
-below.
-
-Identifier:
-- record_id
-
-Exposure:
-- exposure_group
-
-Demographics:
-- demo_age
-- demo_sex
-- demo_race
-
-Clinical (baseline predictors):
-- clinical_binary_1
-- clinical_binary_2
-- clinical_binary_3
-- clinical_binary_4
-- clinical_binary_5
-- clinical_binary_6
-- clinical_continuous_1
-
-Outcomes (event indicators):
-- outcome_1
-- outcome_2
-
-Follow-up time:
-- followup_time_1
-- followup_time_2
-
-Post-baseline:
-- post_baseline_indicator
-
-## Reference RMarkdown rule
-
-The actual research RMarkdown may be used only as a methodological reference.
-
-Claude may use it to understand:
-- analysis order
-- package usage
-- model structure
-- table/figure generation
-- Cox modeling logic
-- propensity score matching logic
-- random forest feature importance logic
-- validation and event-count checks
-
-Claude must not:
-- copy real data
-- copy real data paths
-- preserve private cohort-specific details
-- preserve unmapped real variable names
-- include real model results
-- include real patient counts
-- expose sensitive research context
-
-All implementation in this public demo must use the synthetic schema defined in `R/config.R`.
-
-## Required behavior
-
-Before editing:
-- Inspect the relevant files.
-- Explain the planned change briefly.
-- Do not rewrite unrelated files.
-
-After editing:
-- Show changed files.
-- Run the relevant script.
-- Report validation output.
-- Mention remaining risks or assumptions.
-- Update PROJECT_LOG.md if the task is completed.
-
-## README style rules
-
-- Do not use "Phase" numbering (e.g. "Phase 1", "Phase 2") to label pipeline steps.
-- Do not use pipeline progress tables with status columns (e.g. Complete / Planned).
-- Do not use terms associated with AI-assisted or "vibe coding" workflows.
-- Use plain named sections (e.g. "## Synthetic Data", "## Data Cleaning") as in the original README structure.
-- The planned workflow may be a numbered list but should not imply any step is complete unless it is.
+- Judge balance on the standardized mean difference against `SMD_THRESHOLD`, never on a
+  hypothesis test. At this sample size a test detects differences too small to matter.
+- Compute post-adjustment SMDs against pre-adjustment denominators, so before and after
+  are on one scale.
+- Matched analyses carry `cluster(subclass)`; matched pairs are not independent.
+- Weighted models and Fine-Gray fits use `id =` with `robust = TRUE`, and every interval
+  and p-value comes from `fit$var` (sandwich), never `fit$naive.var`. Overlap weights are
+  analytic, not frequency, weights.
+- Never apply `cox.zph()` to a Fine-Gray fit. Use `ph_interval_test()` instead.
+- Do not describe an estimator as robust unless the code implements it.
+- Report effective sample size alongside any weighted analysis.
+- State PH conclusions as absence of evidence, never as confirmation.
 
 ## Failure behavior
 
-If required columns are missing:
-- Stop with a clear error.
-- Do not rename columns automatically unless the user explicitly asks.
+- Missing required columns: stop with a clear error. Do not rename columns automatically.
+- Missing dependency file: stop and name the notebook that produces it.
+- Model fitting fails: report the error. Do not fabricate outputs.
+- Assertion fails: diagnose the cause. Do not weaken the assertion.
+- Never wrap a whole block in `suppressWarnings()`. Root-cause the warning and scope any
+  muffling to the specific message, with a comment saying why.
 
-If a dependency file is missing:
-- Stop and explain which previous script must be run.
+## Reference material rule
 
-If model fitting fails:
-- Report the error.
-- Do not create fake output files.
-- Do not suppress warnings without explanation.
+Real research materials may be consulted as a methodological reference only — for analysis
+order, package usage, model structure, and validation logic.
 
-If validation fails:
-- Stop the pipeline.
-- Explain what failed.
+Never carry across real data, real file paths, real variable names, real results, real
+patient counts, or cohort-specific detail. All implementation uses the synthetic schema in
+`R/config.R`.
+
+## README style rules
+
+- No "Phase" numbering to label pipeline steps.
+- No progress tables with status columns.
+- No terminology associated with AI-assisted workflows.
+- Plain named sections.
+
+## After editing
+
+- Show changed files.
+- Render the affected notebook and report the actual output.
+- Mention remaining risks or assumptions.
+- Update `PROJECT_LOG.md` when a task is complete.
