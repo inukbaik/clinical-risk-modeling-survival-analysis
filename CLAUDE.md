@@ -94,6 +94,44 @@ Cox and Fine-Gray models may use follow-up time only as the survival time.
 - Report effective sample size alongside any weighted analysis.
 - State PH conclusions as absence of evidence, never as confirmation.
 
+## Guardrails: four categories, and only three of them stop
+
+`R/contracts.R` holds the fail-fast layer. Checks are placed at the seam between stages,
+validated once on entry, never scattered through the code that does the work or repeated
+inside a loop.
+
+| Category | Question | On failure | Lives in |
+|---|---|---|---|
+| Contract | Does the data and design support this analysis? | Stop before fitting | `R/contracts.R` |
+| Postcondition | Did the computation do what it claims? | Stop | Next to the code it guards |
+| Calibration | Did the simulation produce what it promised? | Stop | Notebooks `00`, `02` |
+| Finding | What did the data say? | **Report, never stop** | `report_agreement()` |
+
+**Never assert a finding.** Whether sensitivity analyses agree, whether an effect is
+protective, whether two estimands coincide — these are properties of the data. Halting on
+one suppresses the result most worth investigating. Use `report_agreement()`, which renders
+a callout and has no failure mode.
+
+**Do enforce preconditions.** An unmet precondition does not stop a model from returning a
+number; it stops that number from meaning what the question asks.
+
+### Adding an analysis
+
+1. Declare `analysis_contract()` — the question as a physician would pose it, the estimand,
+   the population, the estimator, whether it is `causal`, and which gates it `requires`.
+2. Call `validate_contract()` before fitting, and `contract_block()` to render it.
+3. Validate the input shape with `require_schema()` / `schema_for()` at the seam.
+4. Load cross-notebook files with `require_stage_input()`, never bare `readRDS()`.
+
+Gates available: `balance`, `positivity`, `events`, `no_leakage`, `competing_risk`.
+
+**Scope a gate to what the design actually promises, and say so.** The balance gate in
+notebook `05` covers the propensity-model covariates, because overlap weighting guarantees
+balance on those and nothing else. The excluded mediator's residual imbalance is reported
+in the notebook rather than hidden by the narrower scope. Narrowing a gate silently to make
+it pass is the failure mode to avoid; narrowing it explicitly, with the reason and the
+excluded quantity shown, is correct.
+
 ## Failure behavior
 
 - Missing required columns: stop with a clear error. Do not rename columns automatically.

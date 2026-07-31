@@ -67,6 +67,40 @@ Study B is where the design moved after Study A: matching had to chase balance b
 tightening a caliper, and paid for it in discarded subjects. Overlap weighting achieves
 balance by construction and keeps everybody.
 
+## How the pipeline fails
+
+The analyses here are guarded, but not by scattering checks through the code. Each stage
+declares what it needs from its input and what question it is answering, and both are
+validated **once, at the boundary**, before anything is fitted. A violation then surfaces
+where it was introduced rather than as a confusing result several stages downstream.
+
+The design rests on a distinction between four kinds of check, which are not
+interchangeable:
+
+| Category | Question it answers | On failure |
+|---|---|---|
+| **Contract** | Does the data and design support this analysis at all? | Stop before fitting |
+| **Postcondition** | Did the computation do what it claims? | Stop |
+| **Calibration** | Did the simulation produce what it promised? | Stop |
+| **Finding** | What did the data say? | **Report, never stop** |
+
+The first three are errors in the code or the design. The last is a result.
+
+That distinction is the whole point. An unmet precondition does not stop a model from
+producing a number — a cohort that never achieved balance still yields a clean-looking
+hazard ratio with a tight interval, and nothing in the output announces that it does not
+mean what the question asks. So preconditions are enforced.
+
+A sensitivity analysis disagreeing with the primary estimate is the opposite case. It is
+the most informative thing the pipeline can surface, and halting on it would suppress
+exactly the result worth investigating. So findings are reported and never asserted.
+
+Each analysis notebook opens with its contract: the question as a physician would pose it,
+the estimand that answers it, the population the answer applies to, and a table of
+preconditions with their status. Where an analysis is *not* estimating a treatment effect —
+the [random forest](notebooks/03-random-forest.qmd) — the contract says so and the notebook
+carries a warning to that effect.
+
 ## Reading order
 
 1. [Synthetic data](notebooks/00-synthetic-data.qmd) — what is simulated, how, and why the masking preserves what matters
