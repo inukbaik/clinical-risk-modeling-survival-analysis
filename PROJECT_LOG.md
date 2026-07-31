@@ -1,5 +1,68 @@
 # PROJECT_LOG.md
 
+## 2026-07-31 — Fail-fast contracts at the pipeline seams
+
+**Task:** Add the guardrail layer the rebuild lacked. An audit found no
+research-question or estimand validation anywhere: "estimand" appeared only as prose in
+notebooks 04 and 05, and nothing checked that an analysis was capable of answering the
+question it implied.
+
+**Framing:** the interesting question for a data scientist is not which drug is better —
+that is the physician's question — but whether the analysis answers the question the
+physician asked. A pipeline can produce a clean hazard ratio from a cohort that never
+achieved balance, and nothing in the previous code would object.
+
+**Design:** checks at the seam between stages, validated once on entry, not scattered
+through the working code. Four categories, three fatal:
+
+| Category | On failure |
+|---|---|
+| Contract — does the design support this analysis? | Stop before fitting |
+| Postcondition — did the computation do what it claims? | Stop |
+| Calibration — did the simulation produce what it promised? | Stop |
+| Finding — what did the data say? | Report, never stop |
+
+**Files created:** `R/contracts.R` — `require_schema()`, `schema_for()`,
+`require_stage_input()`, `analysis_contract()`, `validate_contract()`, five gates
+(`balance`, `positivity`, `events`, `no_leakage`, `competing_risk`), `contract_block()`,
+`report_agreement()`. Schemas are derived from the vectors in `R/config.R`, so no column
+name is declared twice.
+
+**Files edited:** `R/setup.R`; notebooks `01`–`05`; `index.qmd`; `CLAUDE.md`.
+
+**Bug fixed:** `notebooks/05-competing-risks.qmd` asserted that every sensitivity analysis
+falls on the same side of the null, directly under a comment reading "A disagreement here
+would be a finding, not a formatting problem." A genuine divergence would have failed the
+render instead of being reported. Replaced with `report_agreement()`, which has no failure
+mode.
+
+**Validation results:**
+- Full cold render 1:40, all six notebooks; result tables byte-identical to the
+  pre-contract run, so no guardrail altered an estimate
+- Negative tests, all behaving correctly: unbalanced cohort, leaky predictor, too few
+  events per covariate, positivity violated, competing event absent, and missing gate
+  evidence each stop with a message naming the specific violation; a missing handoff file
+  now reports which notebook produces it instead of dying inside `gzfile()`; a diverging
+  sensitivity estimate renders successfully with an amber callout
+
+**One gate scope corrected, not weakened.** The Study B balance gate initially covered all
+of `BASELINE_PREDICTORS` and failed on `clinical_continuous_1` at |SMD| 0.187. That is
+correct by design: the variable sits on the causal pathway, is deliberately excluded from
+the propensity model, and overlap weighting guarantees balance only on the covariates it is
+given. The gate is now scoped to `PS_FORMULA_VARS` and the notebook reports the mediator's
+residual imbalance explicitly (0.526 unweighted → 0.187 weighted), alongside the contrast
+with Study A, where matching brought the same variable to 0.066 incidentally. Narrowing a
+gate silently to make it pass would have been the failure mode; narrowing it with the
+reason and the excluded quantity shown is the fix.
+
+**Assumptions and remaining risks:**
+- Contracts are declared for the three analyses that answer a question (`02`, `03`, `05`).
+  Notebooks `00`, `01` and `04` build inputs and get schema validation only.
+- The events-per-covariate floor is the conventional 10 and is not derived from anything
+  in this project.
+- Gates run once per notebook by design. An analysis added inside a loop would not be
+  covered without an explicit call.
+
 ## 2026-07-30 — Rebuild as a problem-driven Quarto project
 
 **Task:** Replace the script-based pipeline with six Quarto notebooks organised around
