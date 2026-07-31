@@ -1,0 +1,89 @@
+---
+title: "Clinical Risk Modeling & Survival Analysis"
+subtitle: "Three problems from an observational drug-safety analysis, worked on synthetic data"
+---
+
+## What this is
+
+An observational comparison of two drug classes on time-to-event outcomes, rebuilt
+end to end on synthetic data. It is organised around the three problems that took the
+most work to get right, rather than around a list of methods that were applied.
+
+Every number here comes from simulated data. No real patient data, no real results,
+no real cohort characteristics appear anywhere in this repository. What is preserved
+from the original analysis is the *structure* of the problem: a confounded exposure,
+correlated comorbidities, a lab value sitting on the causal pathway, competing events,
+month-precision death dates, and two data defects that the cleaning step has to catch.
+
+Because the data is simulated, the true parameter values are known. Every estimate in
+these notebooks is checked against the truth it is trying to recover — which is
+something the original analysis could never do, and which is the main reason this
+version is worth reading.
+
+## The three problems
+
+### 1. Matching ran, but it did not balance
+
+The first propensity score match produced matched pairs and a plausible-looking table,
+and several covariates were still imbalanced beyond the conventional threshold. The fix
+was tuning the caliper; the lesson was that matching producing output is not the same
+as matching producing balance, and that post-match balance has to be verified every
+time.
+
+→ [Balance and propensity score matching](notebooks/01-balance-and-psm.qmd)
+
+### 2. Two random forests, two different questions
+
+A random forest on the unmatched cohort with treatment excluded, and one on the matched
+cohort with treatment included, give different variable rankings. They are not in
+conflict — they answer different questions, and neither one estimates a treatment
+effect. Feature importance carries no direction and no significance.
+
+→ [Random forest importance](notebooks/03-random-forest.qmd)
+
+### 3. A competing event that cannot be ignored
+
+Death competes with the outcome of interest: a subject who dies can never go on to
+have the event. Censoring those subjects overstates the outcome's cumulative incidence.
+This part uses overlap weighting for confounding control and a weighted Fine-Gray model
+for the subdistribution hazard, reports the cause-specific hazard alongside it, and
+surrounds the primary estimate with the sensitivity analyses that have to agree with it
+before it means anything.
+
+→ [Competing risks](notebooks/05-competing-risks.qmd)
+
+## The two studies
+
+The work divides into two designs that handle confounding differently.
+
+| | Study A | Study B |
+|---|---|---|
+| Confounding control | 1:1 nearest-neighbour matching on the propensity score | Overlap weighting |
+| Outcome models | Nested Cox proportional hazards ladder | Fine-Gray and cause-specific Cox |
+| Competing risks | Not modelled | Death as a competing event |
+| Machine learning | Random forest feature importance | — |
+
+Study B is where the design moved after Study A: matching had to chase balance by
+tightening a caliper, and paid for it in discarded subjects. Overlap weighting achieves
+balance by construction and keeps everybody.
+
+## Reading order
+
+1. [Synthetic data](notebooks/00-synthetic-data.qmd) — what is simulated, how, and why the masking preserves what matters
+2. [Balance and propensity score matching](notebooks/01-balance-and-psm.qmd) — Study A, **problem 1**
+3. [Cox models](notebooks/02-cox-models.qmd) — Study A outcome models
+4. [Random forest importance](notebooks/03-random-forest.qmd) — Study A, **problem 2**
+5. [Overlap weighting](notebooks/04-overlap-weighting.qmd) — Study B design
+6. [Competing risks](notebooks/05-competing-risks.qmd) — Study B, **problem 3**
+
+## Reproducing it
+
+```bash
+Rscript -e 'renv::restore()'
+quarto render
+```
+
+The synthetic cohorts are generated from a fixed seed on first use and cached to
+`data/synthetic/`. That directory is not tracked: it is derived, it rebuilds in about
+two seconds, and a repository that ships a data file it cannot regenerate is one you
+cannot check.

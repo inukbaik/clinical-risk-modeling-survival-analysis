@@ -1,0 +1,50 @@
+project:
+  type: website
+  output-dir: _site
+  # Every chunk runs from the project root, so paths in R/config.R are the same
+  # whether a notebook is rendered on its own or as part of the site.
+  execute-dir: project
+  render:
+    - index.qmd
+    - notebooks/*.qmd
+
+execute:
+  freeze: auto
+  warning: false
+  message: false
+
+website:
+  title: "Clinical Risk Modeling & Survival Analysis"
+  description: "A synthetic-data walkthrough of three problems from an observational drug-safety analysis."
+  navbar:
+    left:
+      - href: index.qmd
+        text: Overview
+      - text: "Synthetic data"
+        href: notebooks/00-synthetic-data.qmd
+      - text: "Study A"
+        menu:
+          - href: notebooks/01-balance-and-psm.qmd
+            text: "Balance & propensity score matching"
+          - href: notebooks/02-cox-models.qmd
+            text: "Cox models"
+          - href: notebooks/03-random-forest.qmd
+            text: "Random forest importance"
+      - text: "Study B"
+        menu:
+          - href: notebooks/04-overlap-weighting.qmd
+            text: "Overlap weighting"
+          - href: notebooks/05-competing-risks.qmd
+            text: "Competing risks"
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    df-print: kable
+    fig-width: 8
+    fig-height: 5
+    fig-dpi: 150
